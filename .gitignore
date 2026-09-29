@@ -1,5 +1,6 @@
 # Local secrets — never commit
 .env
+cred.txt
 
 # Python
 __pycache__/
