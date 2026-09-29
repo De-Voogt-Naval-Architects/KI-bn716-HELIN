@@ -1,0 +1,16 @@
+{
+  "container_template": {
+    "HostConfig": {
+      "Binds": [
+        "sample-module-data:/data"
+      ]
+    }
+  },
+  "environment_template": {},
+  "configuration_template": {
+    "opcua_ip": "123.34.233.1",
+    "opcua_port": 4840,
+    "poll_interval_ms": 1000
+  },
+  "enabled": true
+}

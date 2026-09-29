@@ -1,0 +1,10 @@
+[project]
+name = "sample-module"
+version = "0.1.0"
+description = "Sample Helin Platform edge module"
+authors = [{ name = "Your Company", email = "dev@example.com" }]
+requires-python = ">=3.11,<4.0"
+dependencies = ["helin-edge-sdk==0.0.2"]
+
+[tool.poetry]
+package-mode = false

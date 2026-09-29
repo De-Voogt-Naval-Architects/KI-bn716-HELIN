@@ -1,0 +1,84 @@
+# On every version tag (v1.2.3): build the module image, push it to the
+# instance's private registry, and publish module version 1.2.3.
+#
+# Uses Action secrets only - see the README for the six required secrets.
+# Never creates modules: the module_uuid comes from the committed module.yaml.
+
+name: Publish module version
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: "Architectures to build"
+        default: "linux/amd64,linux/arm64,linux/arm/v7"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fail fast if a required secret is missing
+        env:
+          HELIN_INSTANCE: ${{ secrets.HELIN_INSTANCE }}
+          HELIN_CLIENT_ID: ${{ secrets.HELIN_CLIENT_ID }}
+          HELIN_CLIENT_SECRET: ${{ secrets.HELIN_CLIENT_SECRET }}
+          REGISTRY_URL: ${{ secrets.REGISTRY_URL }}
+          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+        run: |
+          missing=0
+          for name in HELIN_INSTANCE HELIN_CLIENT_ID HELIN_CLIENT_SECRET REGISTRY_URL REGISTRY_USER REGISTRY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Required Action secret '$name' is not set (repo Settings -> Secrets and variables -> Actions)"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - name: Derive version and image name from the tag
+        id: meta
+        env:
+          REGISTRY_URL: ${{ secrets.REGISTRY_URL }}
+        run: |
+          case "$GITHUB_REF_NAME" in
+            v*) ;;
+            *) echo "::error::This workflow must run from a v* tag - re-run and pick a tag in the ref dropdown"; exit 1 ;;
+          esac
+          version="${GITHUB_REF_NAME#v}"
+          meta_name=$(grep '^meta_name:' module.yaml | cut -d ':' -f 2- | sed 's/^ *//; s/ *$//')
+          [ -n "$meta_name" ] || { echo "::error::meta_name is missing in module.yaml"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "image=$REGISTRY_URL/$meta_name" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to the registry
+        env:
+          REGISTRY_URL: ${{ secrets.REGISTRY_URL }}
+          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+        run: echo "$REGISTRY_PASSWORD" | docker login "$REGISTRY_URL" --username "$REGISTRY_USER" --password-stdin
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push the image
+        run: |
+          docker buildx build \
+            --platform "${{ inputs.platforms || 'linux/amd64,linux/arm64,linux/arm/v7' }}" \
+            --tag "${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}" \
+            --push ./module
+
+      - name: Publish the module version
+        env:
+          HELIN_INSTANCE: ${{ secrets.HELIN_INSTANCE }}
+          HELIN_CLIENT_ID: ${{ secrets.HELIN_CLIENT_ID }}
+          HELIN_CLIENT_SECRET: ${{ secrets.HELIN_CLIENT_SECRET }}
+        run: scripts/publish-version.sh "${{ steps.meta.outputs.version }}" "${{ steps.meta.outputs.image }}" "${{ steps.meta.outputs.version }}"

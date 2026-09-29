@@ -1,0 +1,18 @@
+# Module metadata - used once by `make register` (POST /modules).
+# After registration the module_id/module_uuid are written back here; commit them.
+# CI publishes versions to this module and never creates modules itself.
+#
+# name:      display name shown in the portal (max 32 characters)
+# meta_name: unique slug, lowercase-with-dashes
+# Values are plain single-line text - no quotes, comments on their own lines.
+
+name: Sample Module
+meta_name: sample-module
+author: Your Company
+description: Sample module built from the Helin module template
+logo_url:
+category_id: 1
+
+# Added automatically by `make register` - DO NOT fill in manually:
+# module_id: ...
+# module_uuid: ...
