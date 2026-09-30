@@ -135,38 +135,80 @@ def test_all_empty_in_subscription_mode_raises_a_visible_warning(hdc, tmp_path):
     assert health["warning"] and {m["name"]: m["value"] for m in health["metrics"]}["healthy"] == 0
 
 
-def test_failing_north_output_makes_the_extractor_retry(logger_server, tmp_path):
-    """HDC fans out to several outputs; if one fails the batch is refused and retried."""
-    from fake_hdc import CloudNorth
+def test_cloud_down_does_not_stop_the_onboard_copy(logger_server, tmp_path):
+    """No internet: the cloud output backs up, the onboard database keeps every reading,
+    and the extractor sees no error (HDC accepted everything into its local buffer)."""
+    from fake_hdc import ForwardNorth, North
 
-    class FlakyDb:
-        name, count, failures = "timescale", 0, 1
+    class OnboardDb(North):
+        name = "timescale"
 
         def write(self, batch):
-            if self.failures:
-                self.failures -= 1
-                raise RuntimeError("database down")
-            self.count += len(batch)
+            return len(batch)
 
-    cloud, db = CloudNorth(), FlakyDb()
-    server, port, store = serve_hdc(0, norths=[cloud, db])
+    cloud = ForwardNorth("http://127.0.0.1:9/sensor-reading", retry_min=0.05, retry_max=0.1)
+    onboard = OnboardDb(retry_min=0.05)
+    server, port, store = serve_hdc(0, norths=[cloud, onboard])
     addr, _ = logger_server
     try:
-        a = args_for(addr, tmp_path, "--signal", SIG, "--dest-type", "http",
+        a = args_for(addr, tmp_path, "--signal", SIG, "--signal", SIG2, "--dest-type", "http",
                      "--dest-addr", f"http://localhost:{port}/sensor-reading",
                      "--start", "2026-04-01 12:00:00", "--lag", "0")
-        logger, make_sink = extract.DataLogger(a.addr), extract.sink_factory(a, tmp_path)
-        state = tmp_path / ".state" / "f.json"
-        extract.follow_cycle(logger, a, [SIG], tmp_path, state, now=datetime(2026, 4, 1, 12, 1, tzinfo=UTC),
-                             make_sink=make_sink)
-        assert "HTTP 503" in extract.STATUS["last_error"] and db.count == 0
-        extract.follow_cycle(logger, a, [SIG], tmp_path, state, now=datetime(2026, 4, 1, 12, 1, tzinfo=UTC),
-                             make_sink=make_sink)
+        extract.follow_cycle(extract.DataLogger(a.addr), a, [SIG, SIG2], tmp_path, tmp_path / ".state" / "f.json",
+                             now=datetime(2026, 4, 1, 12, 5, tzinfo=UTC), make_sink=extract.sink_factory(a, tmp_path))
+        assert extract.STATUS["last_error"] is None and extract.STATUS["signals_ok"] == 2
+        for _ in range(100):
+            if onboard.stats()["written"] == 590:
+                break
+            import time; time.sleep(0.05)
+        stats = store.stats()["north"]
+        assert stats["timescale"] == {"written": 590, "backlog": 0, "purged": 0, "last_error": None}
+        assert stats["cloud"]["written"] == 0 and stats["cloud"]["backlog"] == 590
+        assert "cannot reach http://127.0.0.1:9" in stats["cloud"]["last_error"]
     finally:
         server.shutdown()
-    assert db.count == 59 and store.stats()["north"] == {"cloud": 59 + 59, "timescale": 59}
-    # the cloud output saw the refused batch too - HDC's own outputs are independent
 
+
+def test_cloud_catches_up_after_the_link_returns(tmp_path):
+    """Batches queued while the cloud was unreachable are all forwarded once it is back."""
+    from fake_hdc import ForwardNorth
+    cloud_server, cloud_port, cloud_store = serve_hdc(0)          # the "Cloud HDC"
+    cloud_server.shutdown(); cloud_server.server_close()           # ...link down
+    cloud = ForwardNorth(f"http://127.0.0.1:{cloud_port}/sensor-reading", retry_min=0.05, retry_max=0.2)
+    edge_server, edge_port, edge_store = serve_hdc(0, norths=[cloud])
+    try:
+        batch = [{"timestamp": fledge_timestamp(1775044800000 + i * 1000), "asset": SIG, "readings": {"value": i}}
+                 for i in range(50)]
+        for _ in range(4):
+            edge_store.accept(batch)
+        import time; time.sleep(0.3)
+        assert cloud.stats()["backlog"] == 200 and cloud.stats()["written"] == 0
+
+        from http.server import ThreadingHTTPServer
+        from fake_hdc import make_handler
+        import threading
+        revived = ThreadingHTTPServer(("0.0.0.0", cloud_port), make_handler(cloud_store))   # link back
+        threading.Thread(target=revived.serve_forever, daemon=True).start()
+        assert edge_store.drain(5)
+        assert cloud.stats()["written"] == 200 and len(cloud_store.readings) == 200
+        assert [r["readings"]["value"] for r in cloud_store.readings[:50]] == list(range(50))   # order kept
+        revived.shutdown()
+    finally:
+        edge_server.shutdown()
+
+
+def test_backlog_cap_purges_oldest():
+    from fake_hdc import North
+
+    class Down(North):
+        def write(self, batch):
+            raise RuntimeError("down")
+
+    n = Down(max_backlog=100, retry_min=10)
+    for i in range(5):
+        n.enqueue([{"i": i}] * 40)
+    s = n.stats()
+    assert s["backlog"] <= 100 and s["purged"] == 120
 
 def test_asset_modes_and_timestamps():
     assert asset_and_datapoint(SIG, "signal", "value") == (SIG, "value")

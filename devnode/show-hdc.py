@@ -12,7 +12,9 @@ with urllib.request.urlopen("https://127.0.0.1:6684/stats", context=ctx, timeout
 
 per_asset = stats.pop("per_asset")
 print(f"posts {stats['posts']}, readings {stats['readings']}, assets {stats['assets']}")
-print("north outputs (datapoints written): " + ", ".join(f"{k} {v}" for k, v in stats.get("north", {}).items()))
+for name, n in stats.get("north", {}).items():
+    err = f"  last error: {n['last_error']}" if n["last_error"] else ""
+    print(f"north {name:<10} written {n['written']:>9}  backlog {n['backlog']:>7}  purged {n['purged']}{err}")
 print(f"last reading: {json.dumps(stats['last'])}")
 for asset, n in list(per_asset.items())[:12]:
     print(f"{n:>9}  {asset}")

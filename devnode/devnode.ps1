@@ -6,13 +6,15 @@ Dev edge node for the DataLogger extractor, in a Multipass VM (Windows host).
   .\devnode\devnode.ps1 test    poetry lock + proto stubs + pytest in the VM; copies poetry.lock and stubs back
   .\devnode\devnode.ps1 logs    follow the extractor's logs
   .\devnode\devnode.ps1 hdc     what the fake Helin Data Collector received
+  .\devnode\devnode.ps1 outage-real  real DataLogger, one past day, with the Cloud HDC link cut: onboard DB gets it all, cloud catches up after
+  .\devnode\devnode.ps1 outage  cut the Cloud HDC link for 3 min: onboard DB + Grafana must carry on, cloud must catch up
   .\devnode\devnode.ps1 files   list CSVs from a real run with --dest-type csv
   .\devnode\devnode.ps1 real    run the container once against the real DataLoggerGRPC.exe
                                 (settings: DATALOGGER_ADDR, REAL_START, REAL_END, REAL_RATE in devnode\.env)
   .\devnode\devnode.ps1 shell   open a shell in the VM
   .\devnode\devnode.ps1 down    stop the stack (VM keeps running)
 #>
-param([ValidateSet("up", "sync", "test", "logs", "hdc", "files", "real", "shell", "down")][string]$Command = "up")
+param([ValidateSet("up", "sync", "test", "logs", "hdc", "outage", "outage-real", "files", "real", "shell", "down")][string]$Command = "up")
 
 $ErrorActionPreference = "Stop"
 $VM = "helin-edge"
@@ -64,6 +66,12 @@ function Sync-Repo {
     vm ("cd $Remote/devnode && mkdir -p config certs && cp ../module/signals/bn716_tags_subset.txt config/tags " +
         "&& openssl req -x509 -newkey rsa:2048 -nodes -days 365 -subj /CN=HelinDataCollector " +
         "-keyout certs/hdc-key.pem -out certs/hdc-cert.pem 2>/dev/null && chmod 644 certs/*.pem")
+    # Test tags matching the local DataLoggerGRPC.exe (bnXXX) replace the bn716 list when present.
+    $tags = if ($env:DEVNODE_TAGS) { $env:DEVNODE_TAGS } else { "I:\bnXXX\export\profiles\tags.csv" }
+    if (Test-Path $tags) {
+        Invoke-Multipass transfer $tags "${VM}:$Remote/devnode/config/tags"
+        Write-Host "config/tags <- $tags"
+    }
 }
 
 function Copy-Back([string]$name) {
@@ -104,6 +112,8 @@ switch ($Command) {
     "test"  { Ensure-Vm; Sync-Repo; Test-Module }
     "logs"  { compose "logs -f extractor" }
     "hdc"   { Show-Hdc }
+    "outage-real" { vm "cd $Remote/devnode && tr -d '\r' < outage-real.sh > /tmp/outage-real.sh && bash /tmp/outage-real.sh" }
+    "outage" { vm "cd $Remote/devnode && tr -d '\r' < outage-test.sh > /tmp/outage.sh && bash /tmp/outage.sh 180" }
     "files" { vm "cd $Remote/devnode && tr -d '\r' < show-output.sh > /tmp/so.sh && bash /tmp/so.sh real-data" }
     "real"  {
         Ensure-Vm; Sync-Repo
@@ -120,9 +130,8 @@ switch ($Command) {
         vm ("cd $Remote/devnode && sed -i '/^DATALOGGER_ADDR=/d' .env 2>/dev/null; echo DATALOGGER_ADDR=$addr >> .env " +
             "&& (nc -z -w 5 $($addr -replace ':', ' ') && echo 'port reachable' || " +
             "echo 'PORT NOT REACHABLE - is DataLoggerGRPC.exe running? Open the SSH tunnel or allow it in Windows Firewall')")
-        compose "up -d helindatacollector"
-        compose "--profile real run --rm --build real"
-        Show-Hdc
+        compose "--profile extractor up -d --build --force-recreate extractor"
+        Write-Host "Extractor started against the real DataLogger; follow it with .\devnode\devnode.ps1 logs"
     }
     "shell" { & multipass shell $VM }
     "down"  { compose "down" }

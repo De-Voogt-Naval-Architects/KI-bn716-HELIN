@@ -1,42 +1,69 @@
-# Dev edge node for the DataLogger extractor - mirrors the bn716 node template.
+# Dev edge node for the DataLogger extractor - mirrors the bn716 node.
 #
-#   fake-datalogger      synthetic DataLoggerTrends gRPC server (module/tests/fake_datalogger.py)
-#   helindatacollector   fake HDC http_south endpoint, HTTPS with a self-signed cert, as on the
-#                        node (module/tests/fake_hdc.py); `curl -k https://<vm>:6684/stats`
-#   extractor            the module image with the node template's Cmd (only --addr and
-#                        --interval differ), /config/tags mounted read-only
+#   extractor            the module image with the node template's flags, reading the REAL
+#                        DataLoggerGRPC.exe on the Windows PC (SSH reverse tunnel on the VM's
+#                        127.0.0.1:50715) and the test tag list at /config/tags. Host network,
+#                        so it reaches the tunnel; HDC via its published port 127.0.0.1:6684.
+#                        Profile "extractor": started by devnode.ps1 run / outage-real.sh.
+#   helindatacollector   HDC stand-in: HTTPS input, local buffer, independent north outputs:
+#                          cloud     -> cloud-hdc over HTTPS (retries/queues when offline)
+#                          timescale -> TimescaleDB, flatmap rows in public.readings
+#   cloud-hdc            the shore side (Cloud HDC). Cutting its network = no internet on board.
+#   timescaledb          as the Helin TimescaleDB app on the node (module TimescaleDB)
+#   grafana              as Helin Grafana on the node, :3000, datasource + repo dashboards
 #   mosquitto, gateway   portal direct methods (curl health on :8080)
+#   fake-datalogger      synthetic logger, only with --profile fake
 #   tools                poetry lock + proto stubs + pytest (profile "tools")
-#   real                 one run against the real DataLoggerGRPC.exe (profile "real")
 #
-# devnode.ps1 creates ./config/tags (the bn716 list) and ./certs (self-signed) in the VM.
+# devnode.ps1 puts the tag list in ./config/tags and a self-signed cert in ./certs.
 
 name: helin-devnode
 
-x-extractor: &extractor
-  build: ../module
-  image: datalogger-extractor:dev
-  restart: unless-stopped
-
 services:
-  fake-datalogger:
+  extractor:
+    profiles: ["extractor"]
+    build: ../module
     image: datalogger-extractor:dev
-    entrypoint: ["python", "/devtests/fake_datalogger.py", "--port", "50052"]
+    network_mode: host
+    # = module_metadata.json Cmd; the address is the tunnel to the real logger and the
+    # logger holds history, so this copies one past day (range) instead of following now.
+    command:
+      - --addr
+      - ${DATALOGGER_ADDR:-127.0.0.1:50715}
+      - --signals
+      - /config/tags
+      - --rate
+      - "1000"
+      - --dest-type
+      - http
+      - --dest-addr
+      - https://127.0.0.1:6684/sensor-reading
+      - --insecure
+      - --mode
+      - ${TEST_MODE:-range}
+      - --start
+      - ${TEST_START:-2026-04-29 00:00:00}
+      - --end
+      - ${TEST_END:-2026-04-30 00:00:00}
+      - --chunk-minutes
+      - "60"
+      - --on-finish
+      - idle
     environment:
-      PYTHONPATH: /app            # the gRPC stubs live in the image's /app
+      LOCAL_MQTT_HOST: 127.0.0.1
     volumes:
-      - ../module/tests:/devtests:ro
+      - ./config:/config:ro
+      - extractor-state:/data/out
     restart: unless-stopped
 
   helindatacollector:
-    # Fans every accepted batch out to a cloud stand-in (count only) and to the
-    # node's TimescaleDB in HDC Timescale-north flatmap layout, like the real HDC.
     build:
       context: ..
       dockerfile: devnode/fakehdc/Dockerfile
     image: fake-hdc:dev
     command: ["--port", "6684", "--cert", "/certs/hdc-cert.pem", "--key", "/certs/hdc-key.pem",
-              "--timescale", "timescaledb:5432/helindb"]
+              "--timescale", "timescaledb:5432/helindb",
+              "--cloud-url", "https://cloud-hdc:6684/sensor-reading"]
     environment:
       TIMESCALE_PASSWORD: ${TIMESCALE_PASSWORD:-helin-dev}
     networks:
@@ -51,8 +78,16 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  cloud-hdc:
+    image: fake-hdc:dev
+    command: ["--port", "6684", "--cert", "/certs/hdc-cert.pem", "--key", "/certs/hdc-key.pem",
+              "--name", "Cloud HDC", "--no-cloud"]
+    volumes:
+      - ./certs:/certs:ro
+    depends_on: [helindatacollector]
+    restart: unless-stopped
+
   timescaledb:
-    # As the Helin TimescaleDB app on the node: module "TimescaleDB", db helindb, user helin.
     image: timescale/timescaledb:latest-pg16
     environment:
       POSTGRES_DB: helindb
@@ -70,7 +105,6 @@ services:
     restart: unless-stopped
 
   grafana:
-    # As Helin Grafana on the node, with the TimescaleDB datasource and the repo's dashboards.
     image: grafana/grafana:11.5.2
     environment:
       TIMESCALE_PASSWORD: ${TIMESCALE_PASSWORD:-helin-dev}
@@ -93,58 +127,10 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  extractor:
-    <<: *extractor
-    # = module_metadata.json Cmd, with the fake logger's address and a 60 s cycle
-    command:
-      - --addr
-      - fake-datalogger:50052
-      - --signals
-      - /config/tags
-      - --loop
-      - --rate
-      - "1000"
-      - --dest-type
-      - http
-      - --dest-addr
-      - https://HelinDataCollector:6684/sensor-reading
-      - --insecure
-      - --interval
-      - "60"
-    environment:
-      LOCAL_MQTT_HOST: mosquitto
-    volumes:
-      - ./config:/config:ro
-      - extractor-state:/data/out
-    depends_on: [fake-datalogger, helindatacollector, mosquitto]
-
-  real:
-    <<: *extractor
-    profiles: ["real"]
-    command:
-      # devnode.ps1 fills DATALOGGER_ADDR with the Windows host as the VM sees it
-      - --addr=${DATALOGGER_ADDR:-127.0.0.1:50715}
-      - --signals=/config/tags
-      - --mode=${REAL_MODE:-range}
-      - --start=${REAL_START:-2026-04-29 18:00:00}
-      - --end=${REAL_END:-2026-04-29 18:10:00}
-      - --rate=${REAL_RATE:-1000}
-      - --dest-type=${REAL_DEST_TYPE:-http}
-      - --dest-addr=${REAL_DEST_ADDR:-https://127.0.0.1:6684/sensor-reading}
-      - --insecure
-      - --connect-attempts=${REAL_CONNECT_ATTEMPTS:-6}
-      - --on-finish=exit
-      - --force
-    # Host network: reaches the Windows host directly, or 127.0.0.1:50715 when an
-    # SSH reverse tunnel carries the port; the fake HDC is published on 127.0.0.1:6684.
-    network_mode: host
-    volumes:
-      - ./config:/config:ro
-      - real-data:/data/out
-    restart: "no"
-
   mosquitto:
     image: eclipse-mosquitto:2
+    ports:
+      - "127.0.0.1:1883:1883"     # for the host-network extractor's portal link
     volumes:
       - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
     restart: unless-stopped
@@ -156,6 +142,16 @@ services:
     ports:
       - "8080:8080"
     depends_on: [mosquitto]
+    restart: unless-stopped
+
+  fake-datalogger:
+    profiles: ["fake"]
+    image: datalogger-extractor:dev
+    entrypoint: ["python", "/devtests/fake_datalogger.py", "--port", "50052"]
+    environment:
+      PYTHONPATH: /app
+    volumes:
+      - ../module/tests:/devtests:ro
     restart: unless-stopped
 
   tools:
@@ -179,6 +175,5 @@ services:
 
 volumes:
   extractor-state:
-  real-data:
   timescale-data:
   grafana-data:
