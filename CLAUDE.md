@@ -53,7 +53,7 @@ Releases work the template's way (`make register` once, then push a `v*` tag). C
   - HTTP skips `Available=False` samples unless `--send-unavailable`.
   - A failed post raises `DestinationError`: the cycle stops and cursors aren't advanced.
   - `send_signal` returns rows *delivered* (`sink.count`), not rows read.
-- **`--rate 1000`** is the MVP's "unfiltered" sentinel. The bn715 test logger answers it with an empty OK response (and treats other rates as resample-to-N-per-second). `check_all_empty` turns "every signal empty" into `STATUS["warning"]`, which also makes portal health unhealthy. Don't treat an empty response as proof there's no data.
+- **`--rate 1000` is the DataLogger's subscription mode**: it returns the samples exactly as stored, and it's what the node template uses. It gives an empty OK answer when nothing was stored in the window. Any other rate resamples to N values per second, and fills windows with no data with `Available=False` rows. The empty 18:00–18:10 window I first tested on 29 Apr was a no-stored-data window; 12:00–13:00 has data. `check_all_empty` turns "every signal empty" into `STATUS["warning"]`, which also makes portal health unhealthy.
 - **`helin_status.py`**: answers the portal's edge-module-requests on a background thread using `helin-edge-sdk`.
   - `get_health` returns metrics from `STATUS`. `get_configuration` returns the effective flags. `set_configuration` is rejected with 400, because settings live in the template's Cmd or environment.
   - It starts only under the IoT Edge runtime (`IOTEDGE_*`), or with `LOCAL_MQTT_HOST` for the dev node. Failures are logged and never stop the extraction.

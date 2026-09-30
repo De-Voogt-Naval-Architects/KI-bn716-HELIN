@@ -57,16 +57,19 @@ nc -zv 192.168.192.5 50052
 sudo docker ps --format '{{.Names}}' | grep -i datacollector
 ```
 
-## 3. `--rate 1000`: check it on the ship's logger first
+## 3. `--rate 1000` is subscription mode
 
-`--rate` is the `SampleRate` of the gRPC request. Two DataLoggers answer it differently:
+`--rate` is the `SampleRate` of the gRPC request. **`1000` is the DataLogger's subscription mode: it returns the samples exactly as stored**, which is what the template uses to copy the data. Any other value resamples to that many values per second. Tested against `DataLoggerGRPC_bn715` on the office PC on 30 Sep:
 
-| DataLogger | `--rate 1` | `--rate 10` / `999` | `--rate 1000` |
-|---|---|---|---|
-| The one `container-mvp` was developed against (port 50052) | 1/s | | **unfiltered**: every stored change (867,575 rows per week for one AC power tag) |
-| `DataLoggerGRPC_bn715` on the office PC (port 50715), tested 30 Sep | 599 values per 10 min | resampled to 10 / 999 values **per second**, even for a constant tag | **empty answer, no error** |
+| `--rate` | 29 Apr 12:00–13:00, total fuel level | Days with nothing stored |
+|---|---|---|
+| `1000` | 24,510 stored samples, all valid | **empty answer, no error** |
+| `1` | 3,599: a 1-per-second grid | 3,599 rows, all `Available=False` |
+| `999` | about 3.6 million interpolated values | same, all unavailable |
 
-On a logger that behaves like the second one, `--rate 1000` delivers nothing. The module then reports `WARNING No data from any of 169 signals at --rate 1000 ... try --rate 1` in its log and in the portal's health response (`"warning"`, and `healthy` goes to 0). If you see that on bn716, change the template to `"--rate", "1"`. Avoid high values like 999 on such a logger: they are interpolated, not measured.
+So in subscription mode an empty answer means "nothing stored in this window". If every tag comes back empty in a cycle, the module reports `WARNING No data from any of N signals at --rate 1000 ...` in its log and in the portal's health response (`"warning"`, and `healthy` goes to 0). Check that the DataLogger is recording.
+
+Real run on 30 Sep: `--rate 1000`, 29 Apr 12:00–12:10, through HTTPS to an HDC stand-in. 26 of the 169 bn716 tags had stored samples: **31,604 readings delivered, 0 errors**.
 
 ## 4. Check it's running
 
@@ -88,7 +91,7 @@ sudo docker ps --format '{{.Names}}  {{.Image}}' | grep -i datalogger
 sudo docker logs --tail 20 <container name>
 ```
 
-A healthy cycle looks like `cycle up to ...: 29351 rows, 49 signals with data, 120 without, 0 errors`. "Without" includes tags whose samples were all `Available=False`: HTTP delivery skips those by default. Add `--send-unavailable` to send them with a `null` value, but check that HDC accepts nulls before relying on it.
+A healthy cycle looks like `cycle up to ...: 31604 rows, 26 signals with data, 143 without, 0 errors`. "Without" means tags with no stored samples in that window, or whose samples were all `Available=False`: HTTP delivery skips those by default. Add `--send-unavailable` to send them with a `null` value, but check that HDC accepts nulls before relying on it.
 
 ## 5. Publish the image (once per version)
 

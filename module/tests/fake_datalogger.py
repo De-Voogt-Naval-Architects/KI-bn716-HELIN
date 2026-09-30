@@ -41,7 +41,7 @@ class FakeTrends(Trending_pb2_grpc.DataLoggerTrendsServicer):
     def __init__(self, period_ms=1000, reject_ms=False, now_ms=None, empty_at_1000=False):
         self.period_ms = period_ms
         self.reject_ms = reject_ms
-        self.empty_at_1000 = empty_at_1000   # mimic the bn715 logger: rate 1000 -> empty OK answer
+        self.empty_at_1000 = empty_at_1000   # subscription mode with nothing stored: empty OK answer
         self.now_ms = now_ms          # None = wall clock
         self.requests = []
 

@@ -417,15 +417,17 @@ def run_range(args, signals, out_dir, make_sink):
 
 
 def check_all_empty(args, with_data, without_data):
-    """Every signal empty is almost never real: say so loudly (log + portal health).
+    """Every signal empty at once usually means the logger recorded nothing in that
+    window: say so loudly (log + portal health).
 
-    Some DataLogger versions treat SampleRate as "samples per second to return"
-    and answer SampleRate=1000 with an empty OK response instead of unfiltered
-    data (seen on the bn715 logger: 999 -> resampled data, 1000 -> nothing).
+    --rate 1000 is the DataLogger's subscription mode: it returns the samples as
+    stored, and an empty OK answer when none were stored. Lower rates resample to
+    a fixed grid and return rows (Available=False) even where nothing was stored.
     """
     if with_data == 0 and without_data > 0:
-        hint = (" --rate 1000 asks for unfiltered data, which some DataLogger versions answer "
-                "with nothing; try --rate 1." if args.rate >= 1000 else "")
+        hint = (" In subscription mode (--rate 1000) that means the DataLogger stored no samples "
+                "for them in this window - check it is recording these tags."
+                if args.rate >= 1000 else "")
         STATUS["warning"] = f"No data from any of {without_data} signals at --rate {args.rate:g}.{hint}"
         log(f"WARNING {STATUS['warning']}", err=True)
     elif with_data:

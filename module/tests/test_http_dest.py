@@ -116,7 +116,7 @@ def test_range_over_http_and_send_unavailable(logger_server, hdc, tmp_path):
     assert list((tmp_path / ".state").glob("range_http_*.json"))
 
 
-def test_all_empty_at_rate_1000_raises_a_visible_warning(hdc, tmp_path):
+def test_all_empty_in_subscription_mode_raises_a_visible_warning(hdc, tmp_path):
     from fake_datalogger import serve
     server, port, _ = serve(0, empty_at_1000=True)
     url, store = hdc
@@ -128,7 +128,7 @@ def test_all_empty_at_rate_1000_raises_a_visible_warning(hdc, tmp_path):
     finally:
         server.stop(None)
     assert store.readings == []
-    assert "--rate 1000" in extract.STATUS["warning"] and "try --rate 1" in extract.STATUS["warning"]
+    assert "--rate 1000" in extract.STATUS["warning"] and "stored no samples" in extract.STATUS["warning"]
 
     import helin_status
     health = helin_status.Handler(a, [SIG, SIG2], extract.STATUS).on_get_health({})
