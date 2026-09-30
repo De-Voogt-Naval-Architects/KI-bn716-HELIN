@@ -29,17 +29,68 @@ services:
     restart: unless-stopped
 
   helindatacollector:
-    image: datalogger-extractor:dev
-    entrypoint: ["python", "/devtests/fake_hdc.py", "--port", "6684",
-                 "--cert", "/certs/hdc-cert.pem", "--key", "/certs/hdc-key.pem"]
+    # Fans every accepted batch out to a cloud stand-in (count only) and to the
+    # node's TimescaleDB in HDC Timescale-north flatmap layout, like the real HDC.
+    build:
+      context: ..
+      dockerfile: devnode/fakehdc/Dockerfile
+    image: fake-hdc:dev
+    command: ["--port", "6684", "--cert", "/certs/hdc-cert.pem", "--key", "/certs/hdc-key.pem",
+              "--timescale", "timescaledb:5432/helindb"]
+    environment:
+      TIMESCALE_PASSWORD: ${TIMESCALE_PASSWORD:-helin-dev}
     networks:
       default:
         aliases: [HelinDataCollector]
     ports:
       - "6684:6684"
     volumes:
-      - ../module/tests:/devtests:ro
       - ./certs:/certs:ro
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    restart: unless-stopped
+
+  timescaledb:
+    # As the Helin TimescaleDB app on the node: module "TimescaleDB", db helindb, user helin.
+    image: timescale/timescaledb:latest-pg16
+    environment:
+      POSTGRES_DB: helindb
+      POSTGRES_USER: helin
+      POSTGRES_PASSWORD: ${TIMESCALE_PASSWORD:-helin-dev}
+    networks:
+      default:
+        aliases: [TimescaleDB]
+    volumes:
+      - timescale-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U helin -d helindb"]
+      interval: 5s
+      retries: 20
+    restart: unless-stopped
+
+  grafana:
+    # As Helin Grafana on the node, with the TimescaleDB datasource and the repo's dashboards.
+    image: grafana/grafana:11.5.2
+    environment:
+      TIMESCALE_PASSWORD: ${TIMESCALE_PASSWORD:-helin-dev}
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-helin-dev}
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/datalogger-hdc.dashboard.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../grafana:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      timescaledb:
+        condition: service_healthy
     restart: unless-stopped
 
   extractor:
@@ -129,3 +180,5 @@ services:
 volumes:
   extractor-state:
   real-data:
+  timescale-data:
+  grafana-data:

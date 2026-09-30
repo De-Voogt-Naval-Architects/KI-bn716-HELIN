@@ -1,0 +1,10 @@
+# Loads every dashboard JSON in the repo's grafana/ folder (mounted read-only).
+# Edits made in the UI are allowed but not written back - export and save the JSON.
+apiVersion: 1
+providers:
+  - name: datalogger
+    folder: DataLogger
+    type: file
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards

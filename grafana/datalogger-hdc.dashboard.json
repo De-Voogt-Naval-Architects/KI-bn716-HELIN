@@ -1,0 +1,98 @@
+{
+  "title": "DataLogger via HDC - bn716",
+  "uid": "datalogger-hdc",
+  "description": "DataLogger tags delivered by the extractor to the Helin Data Collector and written by its Timescale north plugin (flatmap: \"timestamp\", asset, datapoint, value TEXT). A tag name is rebuilt from asset + datapoint, so --asset-mode signal (asset = tag, datapoint = value), --asset-mode group (asset = parent path, datapoint = last part) and HDC-native datapoints all show up as Fields.<System>.<...> tags.",
+  "tags": ["helin", "hdc", "datalogger", "bn716"],
+  "editable": true,
+  "graphTooltip": 1,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "1m",
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "timezone": "utc",
+  "annotations": { "list": [] },
+  "links": [],
+  "templating": {
+    "list": [
+      { "name": "ds", "label": "Datasource", "type": "datasource", "query": "grafana-postgresql-datasource", "current": {}, "hide": 0, "refresh": 1, "includeAll": false, "multi": false },
+      { "name": "table", "label": "Readings table", "type": "textbox", "query": "readings", "current": { "text": "readings", "value": "readings" }, "hide": 0 },
+      {
+        "name": "system", "label": "System", "type": "query",
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "${ds}" },
+        "definition": "SELECT DISTINCT split_part(tag, '.', 2) FROM (SELECT CASE WHEN datapoint = 'value' THEN asset WHEN position('.' in datapoint) > 0 THEN datapoint ELSE asset || '.' || datapoint END AS tag FROM ${table} WHERE $__timeFilter(\"timestamp\")) r ORDER BY 1",
+        "query": "SELECT DISTINCT split_part(tag, '.', 2) FROM (SELECT CASE WHEN datapoint = 'value' THEN asset WHEN position('.' in datapoint) > 0 THEN datapoint ELSE asset || '.' || datapoint END AS tag FROM ${table} WHERE $__timeFilter(\"timestamp\")) r ORDER BY 1",
+        "refresh": 2, "current": {}, "hide": 0, "includeAll": true, "multi": true, "sort": 1
+      },
+      {
+        "name": "tag", "label": "Tags", "type": "query",
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "${ds}" },
+        "definition": "SELECT DISTINCT tag FROM (SELECT CASE WHEN datapoint = 'value' THEN asset WHEN position('.' in datapoint) > 0 THEN datapoint ELSE asset || '.' || datapoint END AS tag FROM ${table} WHERE $__timeFilter(\"timestamp\")) r WHERE split_part(tag, '.', 2) IN (${system:sqlstring}) ORDER BY 1",
+        "query": "SELECT DISTINCT tag FROM (SELECT CASE WHEN datapoint = 'value' THEN asset WHEN position('.' in datapoint) > 0 THEN datapoint ELSE asset || '.' || datapoint END AS tag FROM ${table} WHERE $__timeFilter(\"timestamp\")) r WHERE split_part(tag, '.', 2) IN (${system:sqlstring}) ORDER BY 1",
+        "refresh": 2, "current": {}, "hide": 0, "includeAll": false, "multi": true, "sort": 1
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1, "type": "stat", "title": "Last reading",
+      "description": "Age of the newest row in the readings table: shows whether DataLogger -> extractor -> HDC -> Timescale is still flowing.",
+      "gridPos": { "h": 4, "w": 5, "x": 0, "y": 0 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "${ds}" },
+      "targets": [{ "refId": "A", "format": "table", "rawQuery": true, "editorMode": "code",
+        "rawSql": "SELECT extract(epoch FROM now() - max(\"timestamp\")) AS \"Age\" FROM ${table} WHERE \"timestamp\" > now() - interval '30 days'" }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "background", "graphMode": "none", "textMode": "value", "justifyMode": "center", "orientation": "auto" },
+      "fieldConfig": { "defaults": { "unit": "s", "decimals": 0,
+        "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 900 }, { "color": "red", "value": 3600 } ] } }, "overrides": [] }
+    },
+    {
+      "id": 2, "type": "stat", "title": "In range",
+      "gridPos": { "h": 4, "w": 7, "x": 5, "y": 0 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "${ds}" },
+      "targets": [{ "refId": "A", "format": "table", "rawQuery": true, "editorMode": "code",
+        "rawSql": "SELECT count(DISTINCT asset || '/' || datapoint) AS \"Tags\", count(*) AS \"Readings\" FROM ${table} WHERE $__timeFilter(\"timestamp\")" }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "none", "graphMode": "none", "textMode": "value_and_name", "justifyMode": "center", "orientation": "vertical" },
+      "fieldConfig": { "defaults": { "decimals": 0, "unit": "short" }, "overrides": [] }
+    },
+    {
+      "id": 3, "type": "timeseries", "title": "Readings per interval",
+      "gridPos": { "h": 4, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "${ds}" },
+      "targets": [{ "refId": "A", "format": "time_series", "rawQuery": true, "editorMode": "code",
+        "rawSql": "SELECT $__timeGroupAlias(\"timestamp\", $__interval), count(*) AS \"readings\" FROM ${table} WHERE $__timeFilter(\"timestamp\") GROUP BY 1 ORDER BY 1" }],
+      "options": { "legend": { "showLegend": false, "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single", "sort": "none" } },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "bars", "fillOpacity": 60, "lineWidth": 1 } }, "overrides": [] }
+    },
+    { "id": 4, "type": "row", "title": "Selected tags", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 4 }, "panels": [] },
+    {
+      "id": 5, "type": "timeseries", "title": "$tag",
+      "repeat": "tag", "repeatDirection": "h", "maxPerRow": 3,
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 5 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "${ds}" },
+      "targets": [{ "refId": "A", "format": "time_series", "rawQuery": true, "editorMode": "code",
+        "rawSql": "SELECT $__timeGroupAlias(ts, $__interval), avg(value::double precision) AS \"mean\", min(value::double precision) AS \"min\", max(value::double precision) AS \"max\" FROM (SELECT \"timestamp\" AS ts, CASE WHEN datapoint = 'value' THEN asset WHEN position('.' in datapoint) > 0 THEN datapoint ELSE asset || '.' || datapoint END AS tag, value FROM ${table} WHERE $__timeFilter(\"timestamp\")) r WHERE tag = '${tag}' AND value ~ '^\\s*[-+]?([0-9]+\\.?[0-9]*|\\.[0-9]+)([eE][-+]?[0-9]+)?\\s*$' GROUP BY 1 ORDER BY 1" }],
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["lastNotNull"] }, "tooltip": { "mode": "multi", "sort": "none" } },
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 0, "showPoints": "never", "spanNulls": false } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "mean" }, "properties": [ { "id": "custom.lineWidth", "value": 2 } ] },
+          { "matcher": { "id": "byRegexp", "options": "min|max" }, "properties": [ { "id": "custom.lineStyle", "value": { "fill": "dot" } }, { "id": "color", "value": { "mode": "fixed", "fixedColor": "gray" } } ] }
+        ] }
+    },
+    { "id": 6, "type": "row", "title": "Overview", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 12 }, "panels": [] },
+    {
+      "id": 7, "type": "table", "title": "Latest value per tag",
+      "description": "Newest value of every tag in the selected systems within the time range.",
+      "gridPos": { "h": 14, "w": 24, "x": 0, "y": 13 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "${ds}" },
+      "targets": [{ "refId": "A", "format": "table", "rawQuery": true, "editorMode": "code",
+        "rawSql": "SELECT DISTINCT ON (tag) tag AS \"Tag\", value AS \"Value\", ts AS \"Time\", n AS \"Readings in range\" FROM (SELECT \"timestamp\" AS ts, CASE WHEN datapoint = 'value' THEN asset WHEN position('.' in datapoint) > 0 THEN datapoint ELSE asset || '.' || datapoint END AS tag, value, count(*) OVER (PARTITION BY asset, datapoint) AS n FROM ${table} WHERE $__timeFilter(\"timestamp\")) r WHERE split_part(tag, '.', 2) IN (${system:sqlstring}) ORDER BY tag, ts DESC" }],
+      "options": { "showHeader": true, "cellHeight": "sm", "footer": { "show": false }, "sortBy": [ { "displayName": "Tag", "desc": false } ] },
+      "fieldConfig": { "defaults": { "custom": { "align": "auto", "filterable": true } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "Time" }, "properties": [ { "id": "unit", "value": "dateTimeAsIso" }, { "id": "custom.width", "value": 190 } ] },
+          { "matcher": { "id": "byName", "options": "Value" }, "properties": [ { "id": "custom.width", "value": 160 } ] },
+          { "matcher": { "id": "byName", "options": "Readings in range" }, "properties": [ { "id": "custom.width", "value": 150 } ] }
+        ] }
+    }
+  ]
+}

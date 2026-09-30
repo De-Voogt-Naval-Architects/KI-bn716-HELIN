@@ -55,7 +55,7 @@ function Install-CorpCa {
 
 function Sync-Repo {
     vm "sudo rm -rf $Remote/module $Remote/devnode $Remote/grafana && mkdir -p $Remote"   # tools container leaves root-owned files
-    foreach ($dir in "module", "devnode") {
+    foreach ($dir in "module", "devnode", "grafana") {
         Invoke-Multipass transfer --recursive (Join-Path $Repo $dir) "${VM}:$Remote/"
     }
     vm "find $Remote -name __pycache__ -prune -exec rm -rf {} +"
@@ -90,7 +90,8 @@ function Show-Endpoints {
     Write-Host ""
     Write-Host "Dev node is up at $ip"
     Write-Host "  Portal health : http://${ip}:8080/api/v1/edge-module-request/devnode/module/datalogger-extractor/health"
-    Write-Host "  Fake HDC      : .\devnode\devnode.ps1 hdc   (what the extractor delivered)"
+    Write-Host "  Fake HDC      : .\devnode\devnode.ps1 hdc   (what the extractor delivered, per north output)"
+    Write-Host "  Grafana       : http://${ip}:3000  (TimescaleDB replica; anonymous view, admin / helin-dev to edit)"
 }
 
 function Show-Hdc {

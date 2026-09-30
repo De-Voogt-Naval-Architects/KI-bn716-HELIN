@@ -93,7 +93,56 @@ sudo docker logs --tail 20 <container name>
 
 A healthy cycle looks like `cycle up to ...: 31604 rows, 26 signals with data, 143 without, 0 errors`. "Without" means tags with no stored samples in that window, or whose samples were all `Available=False`: HTTP delivery skips those by default. Add `--send-unavailable` to send them with a `null` value, but check that HDC accepts nulls before relying on it.
 
-## 5. Publish the image (once per version)
+## 5. Optional: replicate to a database on the node, and run Grafana locally
+
+The extractor doesn't change for this. It hands every reading to HDC once, and **HDC fans it out**: each HDC north plugin (output) has its own filter, so the same readings can go to the cloud *and* to a database on the node.
+
+```
+DataLogger --gRPC--> extractor --HTTPS--> HDC --+--> cloud north (ADX via Cloud HDC)
+                                                +--> Timescale north --> TimescaleDB (node) --> Grafana (node)
+```
+
+**Node template (portal):** add two apps from the Helin catalogue.
+- **TimescaleDB:** module name `TimescaleDB`. Environment `POSTGRES_DB=helindb`, `POSTGRES_USER=helin`, and `POSTGRES_PASSWORD` (keep it secret). Port `5432:5432`. Bind `/var/lib/postgresql/data:/var/lib/postgresql/data`: without it the data is lost on every redeploy.
+- **Helin Grafana.**
+
+**HDC Configurator:** keep the existing cloud north, and add a **Timescale** north plugin next to it:
+
+| Field | Value |
+|---|---|
+| Timescale Broker host | `TimescaleDB` |
+| Timescale Broker Port | `5432` |
+| Username / Password | `helin` / the template's password |
+| Database | `helindb` |
+| Flatmap readings | on (the default): one row per datapoint in `public.readings` (`"timestamp", asset, datapoint, value TEXT`) |
+
+Set the plugin's filter to the DataLogger assets, or leave it open to replicate everything HDC collects. On first connection the plugin creates the table, hypertable and retention policy itself.
+
+**Grafana on the node:** open it from the node's **Zero Trust Tunnel** tab, under "Grafana Dashboard".
+1. Add a PostgreSQL data source: host `TimescaleDB:5432`, database `helindb`, user `helin`, SSL off, TimescaleDB on.
+2. Import `grafana/datalogger-hdc.dashboard.json` (Dashboards → New → Import) and pick that data source in the dropdown at the top.
+
+The dashboard rebuilds a tag name from `asset` + `datapoint`, so it works with `--asset-mode signal` (asset = tag, datapoint = `value`), with `--asset-mode group`, and with HDC-native tags. It shows:
+- a stale-data indicator and the readings per interval
+- one chart per selected tag (mean, min, max)
+- the latest value of every tag
+
+To check the database directly, use the Remote Access tunnel on the node:
+
+```bash
+sudo docker exec -it TimescaleDB psql --dbname helindb --username helin --password
+```
+
+```bash
+SELECT asset, datapoint, count(*), max("timestamp") FROM readings WHERE "timestamp" > now() - interval '1 hour' GROUP BY 1, 2 ORDER BY 1 LIMIT 20;
+```
+
+**Tested on the dev node** (`.\devnode\devnode.ps1 sync`):
+- **Chain:** extractor (template Cmd) → HTTPS → HDC stand-in with a cloud output and a Timescale flatmap output → TimescaleDB → Grafana on port 3000 with this dashboard.
+- **Result:** every batch landed in both outputs (3,380 / 3,380 datapoints in the first cycle).
+- **Failure handling:** if an output fails, the batch is refused and the extractor retries it.
+
+## 6. Publish the image (once per version)
 
 1. Set the six GitHub Action secrets (README → Required secrets). The registry URL, user and password are in `H:\Helin\cred.txt`. `HELIN_INSTANCE`, `HELIN_CLIENT_ID` and `HELIN_CLIENT_SECRET` come from Helin.
 2. Run `make register` once and commit the `module_id` / `module_uuid` it writes into `module.yaml`.

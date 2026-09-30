@@ -1,0 +1,17 @@
+# Dev node only: the node's TimescaleDB as a Grafana datasource.
+apiVersion: 1
+datasources:
+  - name: TimescaleDB (dev node)
+    uid: devnode-timescale
+    type: grafana-postgresql-datasource
+    url: timescaledb:5432
+    user: helin
+    isDefault: true
+    editable: true
+    jsonData:
+      database: helindb
+      sslmode: disable
+      postgresVersion: 1600
+      timescaledb: true
+    secureJsonData:
+      password: $TIMESCALE_PASSWORD

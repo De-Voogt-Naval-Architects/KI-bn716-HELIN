@@ -135,6 +135,39 @@ def test_all_empty_in_subscription_mode_raises_a_visible_warning(hdc, tmp_path):
     assert health["warning"] and {m["name"]: m["value"] for m in health["metrics"]}["healthy"] == 0
 
 
+def test_failing_north_output_makes_the_extractor_retry(logger_server, tmp_path):
+    """HDC fans out to several outputs; if one fails the batch is refused and retried."""
+    from fake_hdc import CloudNorth
+
+    class FlakyDb:
+        name, count, failures = "timescale", 0, 1
+
+        def write(self, batch):
+            if self.failures:
+                self.failures -= 1
+                raise RuntimeError("database down")
+            self.count += len(batch)
+
+    cloud, db = CloudNorth(), FlakyDb()
+    server, port, store = serve_hdc(0, norths=[cloud, db])
+    addr, _ = logger_server
+    try:
+        a = args_for(addr, tmp_path, "--signal", SIG, "--dest-type", "http",
+                     "--dest-addr", f"http://localhost:{port}/sensor-reading",
+                     "--start", "2026-04-01 12:00:00", "--lag", "0")
+        logger, make_sink = extract.DataLogger(a.addr), extract.sink_factory(a, tmp_path)
+        state = tmp_path / ".state" / "f.json"
+        extract.follow_cycle(logger, a, [SIG], tmp_path, state, now=datetime(2026, 4, 1, 12, 1, tzinfo=UTC),
+                             make_sink=make_sink)
+        assert "HTTP 503" in extract.STATUS["last_error"] and db.count == 0
+        extract.follow_cycle(logger, a, [SIG], tmp_path, state, now=datetime(2026, 4, 1, 12, 1, tzinfo=UTC),
+                             make_sink=make_sink)
+    finally:
+        server.shutdown()
+    assert db.count == 59 and store.stats()["north"] == {"cloud": 59 + 59, "timescale": 59}
+    # the cloud output saw the refused batch too - HDC's own outputs are independent
+
+
 def test_asset_modes_and_timestamps():
     assert asset_and_datapoint(SIG, "signal", "value") == (SIG, "value")
     assert asset_and_datapoint(SIG, "group", "value") == ("Fields.Navigation.GPS", "SpeedOverGround")
