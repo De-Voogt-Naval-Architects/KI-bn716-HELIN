@@ -1,0 +1,12 @@
+#cloud-config
+# Multipass VM for the dev edge node: Ubuntu + Docker Engine + compose v2.
+package_update: true
+packages:
+  - docker.io
+  - docker-compose-v2
+  - postgresql-client
+  - mosquitto-clients
+  - jq
+runcmd:
+  - usermod -aG docker ubuntu
+  - systemctl enable --now docker

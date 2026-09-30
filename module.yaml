@@ -6,10 +6,10 @@
 # meta_name: unique slug, lowercase-with-dashes
 # Values are plain single-line text - no quotes, comments on their own lines.
 
-name: Sample Module
-meta_name: sample-module
-author: Your Company
-description: Sample module built from the Helin module template
+name: DataLogger Extractor bn716
+meta_name: datalogger-extractor
+author: De Voogt Naval Architects
+description: Pulls Rhodium DataLogger trends over gRPC (bn716 tag list) and writes daily CSVs per signal on the node
 logo_url:
 category_id: 1
 

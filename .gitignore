@@ -1,5 +1,6 @@
 # Local secrets — never commit
 .env
+devnode/.env
 cred.txt
 
 # Python

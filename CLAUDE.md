@@ -4,37 +4,56 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repo is
 
-A Helin Platform module, created from the "Helin Platform Starter Pack" template. It builds a Python edge module (a Docker container) and publishes versions of it to a Helin Platform instance. At the moment `module/main.py` is still the template's sample, an imaginary OPC-UA collector.
+A Helin Platform edge module for yacht bn716, built from the Helin starter template. Its **primary function** is the **DataLogger extractor**. It pulls trend data out of the ship's Rhodium DataLogger over gRPC (`DataLoggerTrends.GetTrend`, defined in `module/Trending.proto`) for the tags in `module/signals/bn716_tags_subset.txt`, and writes CSVs on the edge node. It started from the `container-mvp` extractor (`H:\Helin\container-mvp v1.zip`), and its request handling follows §1.2.5 of the Rhodium Datalogger Manual (4381F-T016-DL).
+
+`DEPLOY.md` is the operator guide: publishing, preparing the node, and the flags to set in the portal's node template.
+
+Paused work lives on the local branch `sea-margin-era5`: a sea margin module using ERA5 data from the CDS, a TimescaleDB/Grafana dev node, and dashboards. Don't mix it into this branch. **Don't push to GitHub unless the user says so.**
 
 ## Commands
 
-`make` loads `.env` if it exists; `.env.example` lists the variables. The helper scripts are bash and need `curl` and `jq` (on Windows, run them from Git Bash).
+The Windows workstation has no Python or Docker. Tests, `poetry lock`, stub generation and end-to-end runs all happen in the Multipass VM `helin-edge`, via `devnode\devnode.ps1`:
 
-- `make build`: builds the image locally (`docker build -t sample-module:local ./module`)
-- `make token`: prints an M2M access token (`scripts/get-token.sh`)
-- `make register`: registers the module with the platform, once (`POST /api/v1/modules`)
-- `scripts/publish-version.sh <version> <image_name> <image_tag>`: publishes a version by hand; CI normally does this
-- To release: `git tag vX.Y.Z && git push origin vX.Y.Z`
+- `.\devnode\devnode.ps1 test`: runs `poetry lock`, regenerates the gRPC stubs and runs pytest in the VM, then copies `poetry.lock`, `Trending_pb2.py` and `Trending_pb2_grpc.py` back to `module/`.
+- `.\devnode\devnode.ps1 up` / `sync`: builds the image and runs it in follow mode against the fake DataLogger, with Mosquitto and a gateway for the portal routes.
+- `.\devnode\devnode.ps1 files`: summarises the CSVs the extractors wrote. `logs` follows the extractor's log.
+- `.\devnode\devnode.ps1 real`: runs the container once in range mode against the **real** `DataLoggerGRPC.exe` on this PC (`C:\Users\svc_aiws\DataLoggerGRPC_bn715`, port 50715, bn715 database on `I:\bnXXX\Database`).
+  - It reaches Windows at the VM's default gateway (the Hyper-V switch) and sets `DATALOGGER_ADDR` in the VM's `devnode/.env`.
+  - `REAL_START`, `REAL_END`, `REAL_RATE` and `REAL_MODE` override the test window and settings.
+  - The server must be running in its own window (a keypress stops it) and allowed through Windows Firewall.
 
-There are no tests and no linter configured.
+Inside `module/` with Poetry:
+- `poetry run pytest tests/test_extract.py::test_follow_splits_days_and_resumes_without_gaps` runs a single test.
+- `make proto` regenerates the stubs after editing `Trending.proto`.
 
-## Architecture / release flow
+The generated stubs are committed and pinned: grpcio 1.83.0 needs protobuf 7. Keep `grpcio`, `grpcio-tools` and `protobuf` in step in `pyproject.toml`.
 
-1. **`module.yaml`** holds the module's identity (name ≤32 chars, `meta_name` slug, author, category_id). `register.sh` reads it with `grep`/`cut`, not a YAML parser, so values must be plain single-line text with no quotes and no comments on the same line. After registration, `module_id` and `module_uuid` are appended to this file and must be committed. If `module_id` is already present, `register.sh` does nothing.
-2. **`module_metadata.json`** is the body sent with every published version, merged with `version`, `image_name` and `image_tag`:
-   - `container_template`: Docker create options, including the named volume bound to `/data`. The volume name must be unique to this module, otherwise modules share and overwrite each other's config.
-   - `environment_template`: default environment variables.
-   - `configuration_template`: initial runtime config. It must stay in sync with `DEFAULT_CONFIGURATION` in `module/main.py`.
-   - `enabled`: whether the version can be deployed.
-3. **CI** (`.github/workflows/`):
-   - `build.yml` runs on PRs and on pushes to `main`. It only checks that the image builds for linux/amd64, arm64 and arm/v7.
-   - `publish.yml` runs on `v*` tags. It builds and pushes `$REGISTRY_URL/<meta_name>:<version>` for all three architectures, then calls `publish-version.sh`. It needs six Action secrets: `HELIN_CLIENT_ID`, `HELIN_CLIENT_SECRET`, `HELIN_INSTANCE`, `REGISTRY_URL`, `REGISTRY_USER`, `REGISTRY_PASSWORD`. CI never creates modules; `module_uuid` has to be committed already.
-4. **Auth** (`get-token.sh`): nothing is hardcoded. It fetches the auth domain and audience from `$HELIN_INSTANCE/api/v1/configuration/`, then runs an OAuth2 `client_credentials` grant.
+Releases work the template's way (`make register` once, then push a `v*` tag). CI builds linux/amd64 and linux/arm64 only; `build.yml` also runs the tests.
 
-## Module code (`module/`)
+## Architecture (`module/`)
 
-- The module is built on `helin-edge-sdk` (pinned `==0.0.2`, managed with Poetry). It subclasses `EdgeModuleRequestsHandler` and implements `on_get_configuration`, `on_set_configuration` and `on_get_health`. To report errors back to the platform, raise `ConfigurationFailedError(..., status_code=, current_configuration=)`.
-- It starts with `EdgeModuleClient.from_edge_environment(handler).run()`. This reads the `IOTEDGE_*` environment variables that the edge runtime injects, and it blocks. Any long-running work (polling loops etc.) has to start before `.run()`.
-- Config is persisted to `$CONFIG_PATH` (default `/data/configuration.json`) with an atomic write (temp file, then `os.replace`). On load, the saved values are merged over the defaults. The container filesystem is lost on redeploy; only the `/data` volume survives.
-- Dockerfile: stage 1 runs `poetry export` to produce `requirements.txt`, stage 2 installs it with `pip`. It runs as a non-root `module` user (uid 1000). After changing dependencies, update `poetry.lock` (`poetry lock` in `module/`) and keep dependencies pinned.
-- If `meta_name` in `module.yaml` changes, also update the image tag in the `Makefile` and the volume name in `module_metadata.json`.
+- **`extract.py`**: the entrypoint (`ENTRYPOINT ["python", "/app/extract.py"]`). Flags come from the node template's container `Cmd`. Each flag also has a `DL_<FLAG>` environment variable default, and the Cmd flag wins.
+  - `DataLogger.get_trend` tries millisecond epochs first, then falls back to seconds. It treats `NOT_FOUND`, `INVALID_ARGUMENT`, `OUT_OF_RANGE` and `UNKNOWN` as "no data" and raises anything else. `iter_samples` reads whichever `Values*` array the response populated. This logic is the MVP's, unchanged.
+  - **range mode** keeps the MVP's behaviour: one CSV per signal in `--out`.
+    - `IncludePrecedingSample` is on, so each file starts with a row before `--start`.
+    - A completed range writes `.state/range_<...>.json` and is skipped on restart unless `--force`.
+    - Afterwards `--on-finish=idle` (the default when `IOTEDGE_MODULEID` is set) keeps the module from restart-looping.
+  - **follow mode** (the default) runs `follow_cycle` every `--interval` seconds.
+    - Per signal it fetches `[cursor, now - lag)`, with `IncludePrecedingSample` off and rows filtered to that window. It appends them to `YYYY-MM-DD/<csid>.csv` (UTC days, header only on new files).
+    - It saves the cursor to `.state/follow.json` atomically after each signal.
+    - A gRPC error leaves that signal's cursor unchanged, so it's retried; `UNAVAILABLE` ends the cycle. `--keep-days` prunes old day folders.
+  - `STATUS` is the live state shared with the portal handler.
+- **`helin_status.py`**: answers the portal's edge-module-requests on a background thread using `helin-edge-sdk`.
+  - `get_health` returns metrics from `STATUS`. `get_configuration` returns the effective flags. `set_configuration` is rejected with 400, because settings live in the template's Cmd or environment.
+  - It starts only under the IoT Edge runtime (`IOTEDGE_*`), or with `LOCAL_MQTT_HOST` for the dev node. Failures are logged and never stop the extraction.
+  - `start()` is given `STATUS` and `log` explicitly, because `extract.py` runs as `__main__`; importing `extract` there would create a second, empty `STATUS`.
+- **`tests/fake_datalogger.py`**: a gRPC `DataLoggerTrends` server with deterministic data.
+  - One sample per second on exact multiples of the period; value `(t_s % 1000)`; unavailable on whole minutes.
+  - `Missing.*` returns `NOT_FOUND`. `reject_ms=True` mimics a seconds-only logger.
+  - The tests and the dev node's `fake-datalogger` service both use it.
+
+## Node deployment facts
+
+- The container runs as uid 1000 and writes to `/data/out`. The default template uses the named volume `datalogger-extractor-data`. A host bind mount must be `chown 1000:1000`, and `check_writable` exits with that hint otherwise.
+- `--addr` must be the DataLogger machine's real IP. `0.0.0.0:<port>`, as in `DataLoggerGRPC.exe.config`, is rewritten to `localhost`, which is only right when the logger runs on the same host.
+- The CSV columns are `Timestamp_ms, DatetimeUTC, Value, Available, Unit, Name, ValueCSId`. `Value` is blank when `Available` is False. Units are as stored (temperatures in K).

@@ -4,7 +4,7 @@ include .env
 export
 endif
 
-.PHONY: token register build
+.PHONY: token register build test proto
 
 ## Print an M2M access token for the Platform API
 token:
@@ -16,4 +16,12 @@ register:
 
 ## Build the module container image locally
 build:
-	docker build -t sample-module:local ./module
+	docker build -t datalogger-extractor:local ./module
+
+## Run the tests (needs `poetry install --with dev --no-root` in module/)
+test:
+	cd module && poetry run pytest
+
+## Regenerate the gRPC stubs after changing Trending.proto
+proto:
+	cd module && poetry run python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. Trending.proto

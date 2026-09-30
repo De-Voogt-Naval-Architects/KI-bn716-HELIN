@@ -1,16 +1,25 @@
 {
   "container_template": {
+    "Cmd": [
+      "--addr=DATALOGGER_HOST:50715",
+      "--mode=follow",
+      "--rate=1",
+      "--interval=300",
+      "--lag=60",
+      "--backfill-minutes=60",
+      "--keep-days=30"
+    ],
     "HostConfig": {
       "Binds": [
-        "sample-module-data:/data"
-      ]
+        "datalogger-extractor-data:/data/out"
+      ],
+      "LogConfig": {
+        "Type": "json-file",
+        "Config": { "max-size": "10m", "max-file": "3" }
+      }
     }
   },
   "environment_template": {},
-  "configuration_template": {
-    "opcua_ip": "123.34.233.1",
-    "opcua_port": 4840,
-    "poll_interval_ms": 1000
-  },
+  "configuration_template": {},
   "enabled": true
 }

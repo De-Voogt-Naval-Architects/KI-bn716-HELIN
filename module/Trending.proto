@@ -1,0 +1,197 @@
+syntax = "proto3";
+option java_multiple_files = true;
+option java_package = "Trending";
+option java_outer_classname = "TrendingProto";
+option objc_class_prefix = "DL";
+
+package Trending;
+
+message GetTrendRequest {
+  string ElementValueId = 1;
+  int64 StartDateTime = 2;
+  int64 EndDateTime = 3;
+  double SampleRate = 4;
+  int64  CSIdAsInt = 5 [deprecated = true];
+  bool OnlyIntegral = 6;
+  DLAverageMethods Smoothing = 7;
+  string Name = 8;
+  string GroupName = 9;
+  string GroupCSId = 10;
+  string ValueCSId = 11;
+  DLEpoch Epoch = 12;
+  bool IncludePrecedingSample = 13;
+}
+
+enum DLDataType {
+	bit = 0;
+	Boolean = 1;
+	Char = 2;
+	Short = 3;
+	Float = 4;
+	Int32 = 5;
+	Double = 6;
+	Int64 = 7;
+	Vector = 8;
+	DataBlock = 9;
+	BitPack64 = 10;
+}
+
+enum DLAverageMethods{
+	None=0;
+	SMA=1;
+	EMA=2;
+	AMA=3;
+	LMA=4;
+	TMA=5;
+	SWMA=6;
+	EPMA=7;
+}
+
+enum DLEpoch {
+	Epoch_None = 0;
+	Epoch_UnixSeconds = 1;
+	Epoch_UnixMilliseconds = 2;
+}
+
+enum DLOverwriteMode {
+	OverwriteMode_Allow = 0;
+	OverwriteMode_Error = 1;
+}
+
+message GetTrendResponse {
+	double Integral = 1;
+	DLDataType datatype = 2;
+	string Units = 3;
+	double Minimum = 4;
+	double Maximum = 5;
+
+	repeated DLBlob Blobs = 6;
+	repeated DLValue1 Values1 = 7;
+	repeated DLValue8 Values8 = 8;
+	repeated DLValue16 Values16 = 9;
+	repeated DLValue32 Values32 = 22;
+	repeated DLValue32Float Values32Float = 10;
+	repeated DLValue64 Values64 = 23;
+	repeated DLValue64Float Values64Float = 11;
+	repeated DLValue64BitPack Values64BitPack = 21;
+	repeated DLValue128Vector Values128Vector = 12;
+
+	int32 NrOfValues = 13;
+	int64  CSIdAsInt = 14 [deprecated = true];
+	string ElementValueId = 15;
+	string Name = 16;
+	string GroupName = 17;
+	string GroupCSId = 18;
+	string ValueCSId = 19;
+	DLEpoch Epoch = 20;
+	string ElementId = 24;
+	string BlobType = 25;
+}
+
+message TrendData {
+	string ElementValueId = 1;
+	DLDataType Datatype = 2;
+	string Units = 3;
+	string ElementGroupId = 4;
+	string Name = 5;
+	string GroupName = 6;
+	string GroupCSId = 7;
+	string ValueCSId = 8;
+	int32 NrOfValues = 9;
+
+	repeated DLBlob Blobs = 10;
+	repeated DLValue1 Values1 = 11;
+	repeated DLValue8 Values8 = 12;
+	repeated DLValue16 Values16 = 13;
+	repeated DLValue32 Values32 = 17;
+	repeated DLValue32Float Values32Float = 14;
+	repeated DLValue64 Values64 = 18;
+	repeated DLValue64Float Values64Float = 15;
+	repeated DLValue64BitPack Values64BitPack = 19;
+	repeated DLValue128Vector Values128Vector = 16;
+
+	string ModelId = 20;
+	string Type = 21;
+	DLOverwriteMode OverwriteMode = 22;
+
+	string TopicId = 23;
+	string BlobType = 24;
+}
+message DLBlob {
+	int64 TimeStamp = 1;
+	bool Available = 5;
+	bool IsCompressed = 2;
+	bytes Blob = 3;
+	int32 BlobSize = 4;
+}
+message DLValue1 {
+	int64 TimeStamp = 1;
+	bool Available = 5;
+	bool Value = 2;
+	bool Minimum = 3;
+	bool Maximum = 4;
+}
+message DLValue8 {
+	int64 TimeStamp = 1;
+	bool Available = 5;
+	int32 Value = 2;
+	int32 Minimum = 3;
+	int32 Maximum = 4;
+}
+message DLValue16 {
+	int64 TimeStamp = 1;
+	bool Available = 5;
+	sint32 Value = 2;
+	sint32 Minimum = 3;
+	sint32 Maximum = 4;
+}
+message DLValue32 {
+	int64 TimeStamp = 1;
+	bool Available = 5;
+	sint32 Value = 2;
+	sint32 Minimum = 3;
+	sint32 Maximum = 4;
+}
+message DLValue32Float {
+	int64 TimeStamp = 1;
+	bool Available = 5;
+	float Value = 2;
+	float Minimum = 3;
+	float Maximum = 4;
+}
+message DLValue64 {
+	int64 TimeStamp = 1;
+	bool Available = 5;
+	sint64 Value = 2;
+	sint64 Minimum = 3;
+	sint64 Maximum = 4;
+}
+message DLValue64Float {
+	int64 TimeStamp = 1;
+	bool Available = 5;
+	double Value = 2;
+	double Minimum = 3;
+	double Maximum = 4;
+}
+message DLValue64BitPack {
+	int64 TimeStamp = 1;
+	fixed64 Available = 5;
+	fixed64 Value = 6;
+	fixed64 Minimum = 3;
+	fixed64 Maximum = 4;
+}
+message DLValue128Vector {
+	int64 TimeStamp = 1;
+	bool Available = 5;
+	repeated double Value = 2;
+	repeated double Minimum = 3;
+	repeated double Maximum = 4;
+}
+message TrendingResult {
+	string errorCode = 1;
+}
+service DataLoggerTrends 
+{
+	rpc GetTrend (GetTrendRequest) returns (GetTrendResponse) {}
+	rpc SaveTrend (TrendData) returns (TrendingResult) {}
+}
