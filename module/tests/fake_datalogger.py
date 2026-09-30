@@ -38,9 +38,10 @@ def available_at(t_ms):
 
 
 class FakeTrends(Trending_pb2_grpc.DataLoggerTrendsServicer):
-    def __init__(self, period_ms=1000, reject_ms=False, now_ms=None):
+    def __init__(self, period_ms=1000, reject_ms=False, now_ms=None, empty_at_1000=False):
         self.period_ms = period_ms
         self.reject_ms = reject_ms
+        self.empty_at_1000 = empty_at_1000   # mimic the bn715 logger: rate 1000 -> empty OK answer
         self.now_ms = now_ms          # None = wall clock
         self.requests = []
 
@@ -50,6 +51,9 @@ class FakeTrends(Trending_pb2_grpc.DataLoggerTrendsServicer):
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, "Epoch_UnixMilliseconds not supported")
         if request.ValueCSId.startswith("Missing."):
             context.abort(grpc.StatusCode.NOT_FOUND, f"{request.ValueCSId} not logged")
+
+        if self.empty_at_1000 and request.SampleRate >= 1000:
+            return Trending_pb2.GetTrendResponse(Name=request.ValueCSId.rsplit(".", 1)[-1], Units="W")
 
         scale = 1 if request.Epoch == MS else 1000
         start_ms, end_ms = request.StartDateTime * scale, request.EndDateTime * scale + (scale - 1)

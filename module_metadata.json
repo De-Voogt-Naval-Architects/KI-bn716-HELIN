@@ -1,23 +1,25 @@
 {
   "container_template": {
-    "Cmd": [
-      "--addr=DATALOGGER_HOST:50715",
-      "--mode=follow",
-      "--rate=1",
-      "--interval=300",
-      "--lag=60",
-      "--backfill-minutes=60",
-      "--keep-days=30"
-    ],
     "HostConfig": {
       "Binds": [
-        "datalogger-extractor-data:/data/out"
-      ],
-      "LogConfig": {
-        "Type": "json-file",
-        "Config": { "max-size": "10m", "max-file": "3" }
-      }
-    }
+        "/var/lib/helin/config/datalogger:/config:ro",
+        "datalogger-extractor-state:/data/out"
+      ]
+    },
+    "Cmd": [
+      "--addr",
+      "192.168.192.5:50052",
+      "--signals",
+      "/config/tags",
+      "--loop",
+      "--rate",
+      "1000",
+      "--dest-type",
+      "http",
+      "--dest-addr",
+      "https://HelinDataCollector:6684/sensor-reading",
+      "--insecure"
+    ]
   },
   "environment_template": {},
   "configuration_template": {},

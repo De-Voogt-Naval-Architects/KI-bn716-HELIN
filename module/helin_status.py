@@ -25,6 +25,8 @@ class Handler:
             "interval_s": args.interval, "lag_s": args.lag, "chunk_minutes": args.chunk_minutes,
             "backfill_minutes": args.backfill_minutes, "keep_days": args.keep_days,
             "on_finish": args.on_finish,
+            "dest_type": args.dest_type, "dest_addr": args.dest_addr, "insecure": args.insecure,
+            "asset_mode": args.asset_mode, "datapoint": args.datapoint, "batch_size": args.batch_size,
         }
 
     def on_get_configuration(self, payload):
@@ -41,7 +43,7 @@ class Handler:
 
     def on_get_health(self, payload):
         s = dict(self.status)
-        healthy = s["connected"] and s["last_error"] is None
+        healthy = s["connected"] and s["last_error"] is None and not s.get("warning")
         return {
             "metrics": [
                 {"name": "datalogger_connected", "value": int(s["connected"])},
@@ -56,6 +58,7 @@ class Handler:
             "mode": s["mode"],
             "last_cycle_end": s["last_cycle_end"],
             "last_error": s["last_error"],
+            "warning": s.get("warning"),
             "range_done": s["range_done"],
         }
 

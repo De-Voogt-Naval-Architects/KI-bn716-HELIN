@@ -8,3 +8,7 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+
+# Dev node generated files
+devnode/certs/
+devnode/config/

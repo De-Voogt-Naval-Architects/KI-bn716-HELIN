@@ -5,13 +5,14 @@ Dev edge node for the DataLogger extractor, in a Multipass VM (Windows host).
   .\devnode\devnode.ps1 sync    copy module/ and devnode/ in again and rebuild
   .\devnode\devnode.ps1 test    poetry lock + proto stubs + pytest in the VM; copies poetry.lock and stubs back
   .\devnode\devnode.ps1 logs    follow the extractor's logs
-  .\devnode\devnode.ps1 files   list the CSVs the extractors wrote, with row counts
+  .\devnode\devnode.ps1 hdc     what the fake Helin Data Collector received
+  .\devnode\devnode.ps1 files   list CSVs from a real run with --dest-type csv
   .\devnode\devnode.ps1 real    run the container once against the real DataLoggerGRPC.exe
                                 (settings: DATALOGGER_ADDR, REAL_START, REAL_END, REAL_RATE in devnode\.env)
   .\devnode\devnode.ps1 shell   open a shell in the VM
   .\devnode\devnode.ps1 down    stop the stack (VM keeps running)
 #>
-param([ValidateSet("up", "sync", "test", "logs", "files", "real", "shell", "down")][string]$Command = "up")
+param([ValidateSet("up", "sync", "test", "logs", "hdc", "files", "real", "shell", "down")][string]$Command = "up")
 
 $ErrorActionPreference = "Stop"
 $VM = "helin-edge"
@@ -58,6 +59,11 @@ function Sync-Repo {
         Invoke-Multipass transfer --recursive (Join-Path $Repo $dir) "${VM}:$Remote/"
     }
     vm "find $Remote -name __pycache__ -prune -exec rm -rf {} +"
+    # What the node gets from its host folder /var/lib/helin/config/datalogger, and a
+    # self-signed certificate for the fake HDC (the real one is self-signed too).
+    vm ("cd $Remote/devnode && mkdir -p config certs && cp ../module/signals/bn716_tags_subset.txt config/tags " +
+        "&& openssl req -x509 -newkey rsa:2048 -nodes -days 365 -subj /CN=HelinDataCollector " +
+        "-keyout certs/hdc-key.pem -out certs/hdc-cert.pem 2>/dev/null && chmod 644 certs/*.pem")
 }
 
 function Copy-Back([string]$name) {
@@ -66,7 +72,9 @@ function Copy-Back([string]$name) {
     # so transfer to a local temp file, ignore the exit code, and check the file.
     $tmp = Join-Path $env:TEMP "devnode-copyback-$name"
     Remove-Item $tmp -ErrorAction SilentlyContinue
+    $ErrorActionPreference = "Continue"   # PS 5.1 turns native stderr into a terminating error under Stop
     & multipass transfer "${VM}:$Remote/module/$name" $tmp 2>$null
+    $ErrorActionPreference = "Stop"
     if (-not (Test-Path $tmp) -or (Get-Item $tmp).Length -eq 0) { throw "could not copy $name back from the VM" }
     Copy-Item $tmp (Join-Path $Repo "module\$name") -Force
 }
@@ -82,25 +90,38 @@ function Show-Endpoints {
     Write-Host ""
     Write-Host "Dev node is up at $ip"
     Write-Host "  Portal health : http://${ip}:8080/api/v1/edge-module-request/devnode/module/datalogger-extractor/health"
-    Write-Host "  CSVs          : .\devnode\devnode.ps1 files"
+    Write-Host "  Fake HDC      : .\devnode\devnode.ps1 hdc   (what the extractor delivered)"
+}
+
+function Show-Hdc {
+    vm "python3 $Remote/devnode/show-hdc.py"
 }
 
 switch ($Command) {
     "up"    { Ensure-Vm; Sync-Repo; Test-Module; compose "up -d --build --remove-orphans"; Show-Endpoints }
-    "sync"  { Ensure-Vm; Sync-Repo; compose "up -d --build --remove-orphans"; Show-Endpoints }
+    "sync"  { Ensure-Vm; Sync-Repo; compose "up -d --build --remove-orphans --force-recreate"; Show-Endpoints }
     "test"  { Ensure-Vm; Sync-Repo; Test-Module }
     "logs"  { compose "logs -f extractor" }
-    "files" { vm "cd $Remote/devnode && tr -d '\r' < show-output.sh > /tmp/so.sh && bash /tmp/so.sh extractor-data && bash /tmp/so.sh real-data" }
+    "hdc"   { Show-Hdc }
+    "files" { vm "cd $Remote/devnode && tr -d '\r' < show-output.sh > /tmp/so.sh && bash /tmp/so.sh real-data" }
     "real"  {
         Ensure-Vm; Sync-Repo
-        # DataLoggerGRPC.exe runs on this Windows PC: from the VM that is its default gateway
-        # (the Hyper-V switch), unless devnode\.env sets DATALOGGER_ADDR.
-        $gw = ((& multipass exec $VM '--' bash -lc "ip route show default") -split '\s+')[2]
-        vm ("cd $Remote/devnode && touch .env && if ! grep -q '^DATALOGGER_ADDR=' .env; then echo DATALOGGER_ADDR=${gw}:50715 >> .env; fi " +
-            "&& grep '^DATALOGGER_ADDR=' .env && (nc -z -w 5 `$(grep '^DATALOGGER_ADDR=' .env | cut -d= -f2 | tr ':' ' ') " +
-            "&& echo 'port reachable' || echo 'PORT NOT REACHABLE - is DataLoggerGRPC.exe running, and does Windows Firewall allow it?')")
+        # DataLoggerGRPC.exe runs on this Windows PC. Use an SSH reverse tunnel on the
+        # VM's 127.0.0.1:50715 when one is up (Windows Firewall blocks the VM otherwise),
+        # else the VM's default gateway (the Hyper-V switch). $env:DATALOGGER_ADDR overrides.
+        $addr = $env:DATALOGGER_ADDR
+        if (-not $addr) {
+            $gw = ((& multipass exec $VM '--' bash -lc "ip route show default") -split '\s+')[2]
+            & multipass exec $VM '--' bash -lc "nc -z -w 2 127.0.0.1 50715 2>/dev/null"
+            $addr = if ($LASTEXITCODE -eq 0) { "127.0.0.1:50715" } else { "${gw}:50715" }
+        }
+        Write-Host "DataLogger: $addr"
+        vm ("cd $Remote/devnode && sed -i '/^DATALOGGER_ADDR=/d' .env 2>/dev/null; echo DATALOGGER_ADDR=$addr >> .env " +
+            "&& (nc -z -w 5 $($addr -replace ':', ' ') && echo 'port reachable' || " +
+            "echo 'PORT NOT REACHABLE - is DataLoggerGRPC.exe running? Open the SSH tunnel or allow it in Windows Firewall')")
+        compose "up -d helindatacollector"
         compose "--profile real run --rm --build real"
-        vm "cd $Remote/devnode && tr -d '\r' < show-output.sh > /tmp/so.sh && bash /tmp/so.sh real-data"
+        Show-Hdc
     }
     "shell" { & multipass shell $VM }
     "down"  { compose "down" }

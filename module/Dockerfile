@@ -13,7 +13,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 COPY --from=deps /app/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY extract.py helin_status.py Trending_pb2.py Trending_pb2_grpc.py ./
+COPY extract.py destinations.py helin_status.py Trending_pb2.py Trending_pb2_grpc.py ./
 COPY signals ./signals
 
 # Run as non-root (uid 1000). /data/out is where the CSVs go: mount a named

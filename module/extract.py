@@ -1,12 +1,19 @@
 """Extract trend data from a Rhodium DataLogger over gRPC, on a Helin edge node.
 
+Destinations (--dest-type):
+
+  csv     files under --out (daily per-signal CSVs in follow mode)
+  http    POST readings to the Helin Data Collector's http_south endpoint
+          (--dest-addr https://HelinDataCollector:6684/sensor-reading, --insecure
+          for its self-signed certificate) - see destinations.py
+
 Two modes:
 
-  follow  (default) every --interval seconds, fetch what each signal logged since
-          the last run, up to now - --lag, and append it to one CSV per signal
-          per UTC day:  <out>/YYYY-MM-DD/<ClientSpecificId>.csv
-          Progress is kept in <out>/.state/follow.json, so a restarted container
-          carries on where it stopped instead of starting over.
+  follow  (default, or --loop) every --interval seconds, fetch what each signal
+          logged since the last run, up to now - --lag, and deliver it. Progress
+          is kept in <out>/.state/, so a restarted container carries on where it
+          stopped instead of starting over. A failed delivery keeps the signal's
+          position, so the window is retried next cycle.
 
   range   one export of --start..--end, one CSV per signal in <out> (the MVP's
           behaviour). A completed range is recorded in <out>/.state/ and is not
@@ -41,6 +48,7 @@ import grpc
 
 import Trending_pb2
 import Trending_pb2_grpc
+from destinations import CSV_HEADER, CsvDaySink, DestinationError, HttpClient, HttpSink
 
 # The manual puts the ceiling for a single request at 300 MB in wire format.
 MAX_MSG = 512 * 1024 * 1024
@@ -78,7 +86,6 @@ VALUE_ARRAYS = [
     "Values1",
 ]
 
-CSV_HEADER = ["Timestamp_ms", "DatetimeUTC", "Value", "Available", "Unit", "Name", "ValueCSId"]
 
 DEFAULT_SIGNALS = "/app/signals/bn716_tags_subset.txt"
 ON_EDGE = "IOTEDGE_MODULEID" in os.environ
@@ -96,6 +103,7 @@ STATUS = {
     "signals_no_data": 0,
     "signals_error": 0,
     "last_error": None,
+    "warning": None,
     "range_done": None,
 }
 STOP = threading.Event()
@@ -296,7 +304,7 @@ def check_writable(out_dir):
 # --------------------------------------------------------------------------
 
 def export(logger, csid, start, end, rate, chunk_minutes, out_dir):
-    """Write one CSV for one signal. Returns the number of rows written."""
+    """Write one CSV for one signal (the MVP's range export). Returns rows written."""
     out_file = out_dir / f"{safe_filename(csid)}.csv"
     rows = 0
 
@@ -318,12 +326,46 @@ def export(logger, csid, start, end, rate, chunk_minutes, out_dir):
     return rows
 
 
+def send_signal(logger, csid, start, end, rate, chunk_minutes, sink):
+    """Pass [start, end) of one signal to a sink. Returns rows delivered (the
+    HTTP sink skips Available=False samples unless --send-unavailable).
+
+    Raises grpc.RpcError or DestinationError; the caller then keeps the signal's
+    cursor where it was, so the window is retried next time.
+    """
+    lo, hi = int(start.timestamp() * 1000), int(end.timestamp() * 1000)
+    try:
+        for window_start, window_end in windows(start, end, chunk_minutes):
+            # No preceding sample: the previous window/cycle already delivered it.
+            response = logger.get_trend(csid, window_start, window_end, rate, include_preceding=False)
+            if response is None:
+                continue
+            for timestamp_ms, available, value in iter_samples(response, logger.epoch_tag):
+                if lo <= timestamp_ms < hi:
+                    sink.write(csv_row(timestamp_ms, available, value, response, csid))
+    except BaseException:
+        sink.discard()
+        raise
+    sink.close()
+    return sink.count
+
+
+def sink_factory(args, out_dir):
+    """Returns make_sink(csid) for the configured destination."""
+    if args.dest_type == "http":
+        client = HttpClient(args.dest_addr, insecure=args.insecure, timeout=args.http_timeout)
+        return lambda csid: HttpSink(client, csid, batch_size=args.batch_size, asset_mode=args.asset_mode,
+                                     datapoint=args.datapoint, send_unavailable=args.send_unavailable)
+    return lambda csid: CsvDaySink(out_dir, f"{safe_filename(csid)}.csv")
+
+
 def range_key(args, signals):
     digest = hashlib.sha1("\n".join(signals).encode()).hexdigest()[:10]
-    return f"range_{args.start:%Y%m%dT%H%M%S}_{args.end:%Y%m%dT%H%M%S}_{args.rate:g}Hz_{digest}"
+    return (f"range_{args.dest_type}_{args.start:%Y%m%dT%H%M%S}_{args.end:%Y%m%dT%H%M%S}_"
+            f"{args.rate:g}Hz_{digest}")
 
 
-def run_range(args, signals, out_dir):
+def run_range(args, signals, out_dir, make_sink):
     marker = out_dir / ".state" / f"{range_key(args, signals)}.json"
     if marker.exists() and not args.force:
         STATUS["range_done"] = json.loads(marker.read_text())
@@ -338,11 +380,20 @@ def run_range(args, signals, out_dir):
         if STOP.is_set():
             return
         try:
-            rows = export(logger, csid, args.start, args.end, args.rate, args.chunk_minutes, out_dir)
+            if args.dest_type == "csv":
+                rows = export(logger, csid, args.start, args.end, args.rate, args.chunk_minutes, out_dir)
+            else:
+                rows = send_signal(logger, csid, args.start, args.end, args.rate, args.chunk_minutes,
+                                   make_sink(csid))
         except grpc.RpcError as exc:
             STATUS["signals_error"] += 1
             STATUS["last_error"] = f"{csid}: {exc.code().name} {exc.details() or ''}"
             log(f"  ERROR          {csid}: {exc.code().name} {exc.details() or ''}")
+            continue
+        except DestinationError as exc:
+            STATUS["signals_error"] += 1
+            STATUS["last_error"] = f"{csid}: {exc}"
+            log(f"  ERROR          {csid}: {exc}")
             continue
 
         STATUS["rows_total"] += rows
@@ -360,65 +411,30 @@ def run_range(args, signals, out_dir):
     if STATUS["signals_error"] == 0:
         write_json_atomic(marker, summary)   # errors leave it unmarked so a restart retries
     STATUS["range_done"] = summary
-    log(f"Done. {written} of {len(signals)} signals written to {out_dir}")
+    target = args.dest_addr if args.dest_type == "http" else out_dir
+    log(f"Done. {written} of {len(signals)} signals written to {target}")
+    check_all_empty(args, written, STATUS["signals_no_data"])
+
+
+def check_all_empty(args, with_data, without_data):
+    """Every signal empty is almost never real: say so loudly (log + portal health).
+
+    Some DataLogger versions treat SampleRate as "samples per second to return"
+    and answer SampleRate=1000 with an empty OK response instead of unfiltered
+    data (seen on the bn715 logger: 999 -> resampled data, 1000 -> nothing).
+    """
+    if with_data == 0 and without_data > 0:
+        hint = (" --rate 1000 asks for unfiltered data, which some DataLogger versions answer "
+                "with nothing; try --rate 1." if args.rate >= 1000 else "")
+        STATUS["warning"] = f"No data from any of {without_data} signals at --rate {args.rate:g}.{hint}"
+        log(f"WARNING {STATUS['warning']}", err=True)
+    elif with_data:
+        STATUS["warning"] = None
 
 
 # --------------------------------------------------------------------------
-# Follow mode - continuous, resumable, daily files
+# Follow mode - continuous, resumable
 # --------------------------------------------------------------------------
-
-class DayWriter:
-    """Appends rows to <out>/<YYYY-MM-DD>/<csid>.csv, adding the header to new files."""
-
-    def __init__(self, out_dir, csid):
-        self.out_dir = out_dir
-        self.name = f"{safe_filename(csid)}.csv"
-        self.day = None
-        self.handle = None
-        self.writer = None
-
-    def write(self, row):
-        day = row[1][:10]
-        if day != self.day:
-            self.close()
-            folder = self.out_dir / day
-            folder.mkdir(parents=True, exist_ok=True)
-            path = folder / self.name
-            new = not path.exists() or path.stat().st_size == 0
-            self.handle = path.open("a", newline="", encoding="utf-8")
-            self.writer = csv.writer(self.handle)
-            if new:
-                self.writer.writerow(CSV_HEADER)
-            self.day = day
-        self.writer.writerow(row)
-
-    def close(self):
-        if self.handle:
-            self.handle.flush()
-            os.fsync(self.handle.fileno())
-            self.handle.close()
-        self.handle = self.writer = self.day = None
-
-
-def follow_signal(logger, csid, start, end, rate, chunk_minutes, out_dir):
-    """Append [start, end) of one signal. Returns rows written; raises on gRPC errors."""
-    lo, hi = int(start.timestamp() * 1000), int(end.timestamp() * 1000)
-    writer = DayWriter(out_dir, csid)
-    rows = 0
-    try:
-        for window_start, window_end in windows(start, end, chunk_minutes):
-            # No preceding sample: the previous cycle already wrote it.
-            response = logger.get_trend(csid, window_start, window_end, rate, include_preceding=False)
-            if response is None:
-                continue
-            for timestamp_ms, available, value in iter_samples(response, logger.epoch_tag):
-                if lo <= timestamp_ms < hi:
-                    writer.write(csv_row(timestamp_ms, available, value, response, csid))
-                    rows += 1
-    finally:
-        writer.close()
-    return rows
-
 
 def prune(out_dir, keep_days, today):
     if keep_days <= 0:
@@ -430,8 +446,9 @@ def prune(out_dir, keep_days, today):
             log(f"Pruned {folder.name} (older than {keep_days} days)")
 
 
-def follow_cycle(logger, args, signals, out_dir, state_path, now=None):
-    """One pass over all signals. Returns rows written."""
+def follow_cycle(logger, args, signals, out_dir, state_path, now=None, make_sink=None):
+    """One pass over all signals. Returns rows delivered."""
+    make_sink = make_sink or (lambda csid: CsvDaySink(out_dir, f"{safe_filename(csid)}.csv"))
     now = now or datetime.now(timezone.utc)
     end = (now - timedelta(seconds=args.lag)).replace(microsecond=0)
     initial = args.start or (end - timedelta(minutes=args.backfill_minutes))
@@ -451,7 +468,7 @@ def follow_cycle(logger, args, signals, out_dir, state_path, now=None):
         if start >= end:
             continue
         try:
-            rows = follow_signal(logger, csid, start, end, args.rate, args.chunk_minutes, out_dir)
+            rows = send_signal(logger, csid, start, end, args.rate, args.chunk_minutes, make_sink(csid))
         except grpc.RpcError as exc:
             errors += 1
             STATUS["last_error"] = f"{csid}: {exc.code().name} {exc.details() or ''}"
@@ -460,6 +477,11 @@ def follow_cycle(logger, args, signals, out_dir, state_path, now=None):
                 STATUS["connected"] = False
                 break  # logger gone - stop this cycle, keep cursors, retry next time
             continue
+        except DestinationError as exc:
+            errors += 1
+            STATUS["last_error"] = f"destination: {exc}"
+            log(f"  ERROR          {csid}: {exc}", err=True)
+            break  # destination down - stop this cycle, keep cursors, retry next time
 
         cursors[csid] = int(end.timestamp() * 1000)
         write_json_atomic(state_path, {"rate": args.rate, "signals": cursors})
@@ -477,17 +499,19 @@ def follow_cycle(logger, args, signals, out_dir, state_path, now=None):
         STATUS["connected"] = True
     log(f"cycle up to {end:%Y-%m-%d %H:%M:%S}Z: {cycle_rows} rows, {ok} signals with data, "
         f"{no_data} without, {errors} errors")
-    prune(out_dir, args.keep_days, end)
+    check_all_empty(args, ok, no_data)
+    if args.dest_type == "csv":
+        prune(out_dir, args.keep_days, end)
     return cycle_rows
 
 
-def run_follow(args, signals, out_dir):
-    state_path = out_dir / ".state" / "follow.json"
+def run_follow(args, signals, out_dir, make_sink):
+    state_path = out_dir / ".state" / f"follow{'' if args.dest_type == 'csv' else '-' + args.dest_type}.json"
     logger = DataLogger(args.addr, timeout=args.timeout, connect_attempts=args.connect_attempts)
     while not STOP.is_set():
         started = time.monotonic()
         try:
-            follow_cycle(logger, args, signals, out_dir, state_path)
+            follow_cycle(logger, args, signals, out_dir, state_path, make_sink=make_sink)
         except Exception as exc:  # keep the service alive; report via logs and health
             STATUS["last_error"] = f"{type(exc).__name__}: {exc}"
             log(f"cycle failed: {exc!r}", err=True)
@@ -503,12 +527,16 @@ def env(name, default=None):
     return value if value not in (None, "") else default
 
 
+def env_flag(name):
+    return (env(name, "") or "").lower() in ("1", "true", "yes")
+
+
 def build_parser():
     p = argparse.ArgumentParser(
-        description="Extract DataLogger trends to CSV (follow = continuous, range = one export).",
+        description="Extract DataLogger trends over gRPC to CSV files or the Helin Data Collector.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         epilog="Every option can also be set with an environment variable DL_<OPTION>, "
-               "e.g. DL_ADDR, DL_MODE, DL_RATE (DL_SIGNAL takes a comma-separated list).",
+               "e.g. DL_ADDR, DL_MODE, DL_RATE, DL_DEST_ADDR (DL_SIGNAL takes a comma-separated list).",
     )
     p.add_argument("--addr", default=env("ADDR", "0.0.0.0:50052"), help="DataLogger address, host:port")
     p.add_argument("--signals", default=env("SIGNALS", DEFAULT_SIGNALS),
@@ -518,12 +546,32 @@ def build_parser():
                    help="A single ClientSpecificId; repeatable")
     p.add_argument("--mode", choices=["follow", "range"], default=env("MODE"),
                    help="Default: range when --end is given, otherwise follow")
+    p.add_argument("--loop", action="store_true", default=env_flag("LOOP"),
+                   help="Run continuously (same as --mode follow)")
     p.add_argument("--start", type=parse_time, default=env("START"),
                    help="UTC. range: required. follow: where to begin when there is no saved state")
     p.add_argument("--end", type=parse_time, default=env("END"), help="UTC, exclusive (range mode)")
     p.add_argument("--rate", type=float, default=float(env("RATE", 1.0)),
                    help="Sample rate in Hz. 1 = one per second, 0.1 = one per 10 s, 1000 = unfiltered")
-    p.add_argument("--out", default=env("OUT", "/data/out"), help="Output directory")
+    p.add_argument("--dest-type", choices=["csv", "http"], default=env("DEST_TYPE", "csv"),
+                   help="csv = files under --out; http = POST readings to the HDC http_south endpoint")
+    p.add_argument("--dest-addr", default=env("DEST_ADDR"),
+                   help="http: endpoint URL, e.g. https://HelinDataCollector:6684/sensor-reading")
+    p.add_argument("--insecure", action="store_true", default=env_flag("INSECURE"),
+                   help="http: do not verify the endpoint's TLS certificate (self-signed HDC)")
+    p.add_argument("--batch-size", type=int, default=int(env("BATCH_SIZE", 500)),
+                   help="http: readings per POST")
+    p.add_argument("--http-timeout", type=float, default=float(env("HTTP_TIMEOUT", 30)),
+                   help="http: seconds per POST")
+    p.add_argument("--asset-mode", choices=["signal", "group"], default=env("ASSET_MODE", "signal"),
+                   help="http: signal = asset is the ClientSpecificId; group = asset is its parent path "
+                        "and the datapoint its last part")
+    p.add_argument("--datapoint", default=env("DATAPOINT", "value"),
+                   help="http, asset-mode signal: datapoint name for the value")
+    p.add_argument("--send-unavailable", action="store_true", default=env_flag("SEND_UNAVAILABLE"),
+                   help="http: also send Available=False samples (value null); default skips them")
+    p.add_argument("--out", default=env("OUT", "/data/out"),
+                   help="csv: output directory. Both: where the resume state (.state/) is kept")
     p.add_argument("--chunk-minutes", type=int, default=int(env("CHUNK_MINUTES", 1440)),
                    help="Minutes of data per request; lower it if responses get too large")
     p.add_argument("--connect-attempts", type=int, default=int(env("CONNECT_ATTEMPTS", 0)),
@@ -536,17 +584,21 @@ def build_parser():
     p.add_argument("--backfill-minutes", type=int, default=int(env("BACKFILL_MINUTES", 60)),
                    help="follow: without saved state or --start, begin this long before now")
     p.add_argument("--keep-days", type=int, default=int(env("KEEP_DAYS", 0)),
-                   help="follow: delete day folders older than this; 0 keeps everything")
+                   help="follow, csv: delete day folders older than this; 0 keeps everything")
     p.add_argument("--on-finish", choices=["exit", "idle"], default=env("ON_FINISH", "idle" if ON_EDGE else "exit"),
                    help="range: what to do when done (idle keeps an edge module from restart-looping)")
-    p.add_argument("--force", action="store_true", default=env("FORCE", "") in ("1", "true", "yes"),
+    p.add_argument("--force", action="store_true", default=env_flag("FORCE"),
                    help="range: re-run even if this exact range already completed")
-    p.add_argument("--no-helin", action="store_true", default=env("NO_HELIN", "") in ("1", "true", "yes"),
+    p.add_argument("--no-helin", action="store_true", default=env_flag("NO_HELIN"),
                    help="Do not answer the Helin portal's health/configuration requests")
     return p
 
 
 def validate(p, args):
+    if args.loop:
+        if args.mode == "range":
+            p.error("--loop and --mode range contradict each other")
+        args.mode = "follow"
     if args.mode is None:
         args.mode = "range" if args.end else "follow"
     if args.mode == "range":
@@ -554,10 +606,14 @@ def validate(p, args):
             p.error("range mode needs --start and --end")
         if args.end <= args.start:
             p.error(f"--end ({args.end}) must be after --start ({args.start}).")
+    if args.dest_type == "http" and not args.dest_addr:
+        p.error("--dest-type http needs --dest-addr, e.g. https://HelinDataCollector:6684/sensor-reading")
+    if args.dest_addr and not args.dest_addr.startswith(("http://", "https://")):
+        p.error(f"--dest-addr must start with http:// or https://, got {args.dest_addr!r}")
     for name in ("connect_attempts", "keep_days", "backfill_minutes"):
         if getattr(args, name) < 0:
             p.error(f"--{name.replace('_', '-')} must be 0 or greater.")
-    for name in ("rate", "interval", "chunk_minutes", "timeout"):
+    for name in ("rate", "interval", "chunk_minutes", "timeout", "batch_size", "http_timeout"):
         if getattr(args, name) <= 0:
             p.error(f"--{name.replace('_', '-')} must be greater than 0.")
     if args.lag < 0:
@@ -572,6 +628,7 @@ def main(argv=None):
     signals = read_signals(args.signal, args.signals)
     out_dir = Path(args.out)
     check_writable(out_dir)
+    make_sink = sink_factory(args, out_dir)
     STATUS["mode"] = args.mode
 
     for sig in (signals_module.SIGTERM, signals_module.SIGINT):
@@ -588,16 +645,20 @@ def main(argv=None):
         log(f"range      : {args.start:%Y-%m-%d %H:%M} .. {args.end:%Y-%m-%d %H:%M} UTC")
     else:
         log(f"interval   : every {args.interval:g} s, {args.lag:g} s behind now"
-            + (f", keeping {args.keep_days} days" if args.keep_days else ""))
+            + (f", keeping {args.keep_days} days" if args.keep_days and args.dest_type == "csv" else ""))
     log(f"rate       : {args.rate:g} Hz")
     log(f"signals    : {len(signals)}")
-    log(f"output     : {out_dir}")
+    if args.dest_type == "http":
+        log(f"output     : POST {args.dest_addr} (asset-mode {args.asset_mode}, batches of {args.batch_size}"
+            + (", TLS not verified" if args.insecure else "") + f"); state in {out_dir / '.state'}")
+    else:
+        log(f"output     : {out_dir}")
 
     if args.mode == "follow":
-        run_follow(args, signals, out_dir)
+        run_follow(args, signals, out_dir, make_sink)
         return
 
-    run_range(args, signals, out_dir)
+    run_range(args, signals, out_dir, make_sink)
     if args.on_finish == "idle" and not STOP.is_set():
         log("Range finished; idling (on-finish=idle). Stop or redeploy the module to end.")
         STOP.wait()

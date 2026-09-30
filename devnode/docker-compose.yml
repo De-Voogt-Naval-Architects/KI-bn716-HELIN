@@ -1,14 +1,15 @@
-# Dev edge node for the DataLogger extractor.
+# Dev edge node for the DataLogger extractor - mirrors the bn716 node template.
 #
-#   fake-datalogger  synthetic DataLoggerTrends gRPC server (module/tests/fake_datalogger.py)
-#   extractor        the module image, built exactly as CI builds it, in follow mode
-#   mosquitto        stands in for edgeHub (portal direct methods over MQTT)
-#   gateway          the Helin edge-module-request API routes on :8080 (curl health)
-#   tools            poetry lock + proto stubs + pytest (profile "tools")
-#   real             the extractor against the real DataLoggerGRPC.exe on the Windows host
-#                    (profile "real"; DATALOGGER_ADDR in devnode/.env)
+#   fake-datalogger      synthetic DataLoggerTrends gRPC server (module/tests/fake_datalogger.py)
+#   helindatacollector   fake HDC http_south endpoint, HTTPS with a self-signed cert, as on the
+#                        node (module/tests/fake_hdc.py); `curl -k https://<vm>:6684/stats`
+#   extractor            the module image with the node template's Cmd (only --addr and
+#                        --interval differ), /config/tags mounted read-only
+#   mosquitto, gateway   portal direct methods (curl health on :8080)
+#   tools                poetry lock + proto stubs + pytest (profile "tools")
+#   real                 one run against the real DataLoggerGRPC.exe (profile "real")
 #
-# CSVs land in the named volumes; read them with `devnode.ps1 files`.
+# devnode.ps1 creates ./config/tags (the bn716 list) and ./certs (self-signed) in the VM.
 
 name: helin-devnode
 
@@ -20,46 +21,74 @@ x-extractor: &extractor
 services:
   fake-datalogger:
     image: datalogger-extractor:dev
-    entrypoint: ["python", "/devtests/fake_datalogger.py", "--port", "50715"]
+    entrypoint: ["python", "/devtests/fake_datalogger.py", "--port", "50052"]
     environment:
       PYTHONPATH: /app            # the gRPC stubs live in the image's /app
     volumes:
       - ../module/tests:/devtests:ro
     restart: unless-stopped
 
+  helindatacollector:
+    image: datalogger-extractor:dev
+    entrypoint: ["python", "/devtests/fake_hdc.py", "--port", "6684",
+                 "--cert", "/certs/hdc-cert.pem", "--key", "/certs/hdc-key.pem"]
+    networks:
+      default:
+        aliases: [HelinDataCollector]
+    ports:
+      - "6684:6684"
+    volumes:
+      - ../module/tests:/devtests:ro
+      - ./certs:/certs:ro
+    restart: unless-stopped
+
   extractor:
     <<: *extractor
+    # = module_metadata.json Cmd, with the fake logger's address and a 60 s cycle
     command:
-      - --addr=fake-datalogger:50715
-      - --mode=follow
-      - --rate=1
-      - --interval=60
-      - --lag=30
-      - --backfill-minutes=30
-      - --keep-days=7
+      - --addr
+      - fake-datalogger:50052
+      - --signals
+      - /config/tags
+      - --loop
+      - --rate
+      - "1000"
+      - --dest-type
+      - http
+      - --dest-addr
+      - https://HelinDataCollector:6684/sensor-reading
+      - --insecure
+      - --interval
+      - "60"
     environment:
       LOCAL_MQTT_HOST: mosquitto
     volumes:
-      - extractor-data:/data/out
-    depends_on: [fake-datalogger, mosquitto]
+      - ./config:/config:ro
+      - extractor-state:/data/out
+    depends_on: [fake-datalogger, helindatacollector, mosquitto]
 
   real:
     <<: *extractor
     profiles: ["real"]
     command:
       # devnode.ps1 fills DATALOGGER_ADDR with the Windows host as the VM sees it
-      - --addr=${DATALOGGER_ADDR:?set DATALOGGER_ADDR}
+      - --addr=${DATALOGGER_ADDR:-127.0.0.1:50715}
+      - --signals=/config/tags
       - --mode=${REAL_MODE:-range}
       - --start=${REAL_START:-2026-04-29 18:00:00}
       - --end=${REAL_END:-2026-04-29 18:10:00}
-      - --rate=${REAL_RATE:-1}
+      - --rate=${REAL_RATE:-1000}
+      - --dest-type=${REAL_DEST_TYPE:-http}
+      - --dest-addr=${REAL_DEST_ADDR:-https://127.0.0.1:6684/sensor-reading}
+      - --insecure
       - --connect-attempts=${REAL_CONNECT_ATTEMPTS:-6}
       - --on-finish=exit
       - --force
     # Host network: reaches the Windows host directly, or 127.0.0.1:50715 when an
-    # SSH reverse tunnel carries the port (see devnode.ps1 tunnel).
+    # SSH reverse tunnel carries the port; the fake HDC is published on 127.0.0.1:6684.
     network_mode: host
     volumes:
+      - ./config:/config:ro
       - real-data:/data/out
     restart: "no"
 
@@ -98,5 +127,5 @@ services:
         poetry run pytest -q -p no:cacheprovider
 
 volumes:
-  extractor-data:
+  extractor-state:
   real-data:
