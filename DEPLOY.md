@@ -144,8 +144,16 @@ SELECT asset, datapoint, count(*), max("timestamp") FROM readings WHERE "timesta
 
 ## 6. Publish the image (once per version)
 
-1. Set the six GitHub Action secrets (README → Required secrets). The registry URL, user and password are in `H:\Helin\cred.txt`. `HELIN_INSTANCE`, `HELIN_CLIENT_ID` and `HELIN_CLIENT_SECRET` come from Helin.
-2. Run `make register` once and commit the `module_id` / `module_uuid` it writes into `module.yaml`.
+1. Set the six GitHub Action secrets (README → Required secrets). For the Feadship instance, one M2M pair, the "Feadship M2M" credentials kept outside the repo, is used for both the Platform API and the container registry (confirmed by Helin):
+
+   | Secret | Value |
+   |---|---|
+   | `HELIN_INSTANCE` | `https://feadship.helinplatform.com` |
+   | `HELIN_CLIENT_ID` / `REGISTRY_USER` | the M2M client ID |
+   | `HELIN_CLIENT_SECRET` / `REGISTRY_PASSWORD` | the M2M client secret |
+   | `REGISTRY_URL` | `creuwplatformfeadshipprd.azurecr.io` |
+
+2. Run `make register` once and commit the `module_id` / `module_uuid` it writes into `module.yaml`. **Done 2 Oct 2026: module_id 37, module_uuid `c2acc96d-6634-48e1-a1eb-2be3900ae3bd`.**
 3. Push a tag, e.g. `git tag v0.1.0 && git push origin v0.1.0`. CI builds linux/amd64 and linux/arm64, pushes `<REGISTRY_URL>/datalogger-extractor:0.1.0` and publishes the module version.
 
 ## All flags
