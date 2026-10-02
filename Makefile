@@ -4,7 +4,7 @@ include .env
 export
 endif
 
-.PHONY: token register build test proto
+.PHONY: token register preflight build test proto
 
 ## Print an M2M access token for the Platform API
 token:
@@ -13,6 +13,10 @@ token:
 ## One-time module registration (writes module_id back into module.yaml)
 register:
 	./scripts/register.sh
+
+## Check the six publish secrets (token, module, registry login) - publishes nothing
+preflight:
+	./scripts/preflight.sh
 
 ## Build the module container image locally
 build:
